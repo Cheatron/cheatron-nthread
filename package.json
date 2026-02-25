@@ -1,0 +1,57 @@
+{
+  "name": "@cheatron/nthread",
+  "version": "1.0.0",
+  "description": "Non-invasive x64 Windows thread hijacking library — seize control of existing threads without shellcode, remote allocation, or CreateRemoteThread.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "thread-hijacking",
+    "windows",
+    "x64",
+    "game-hacking",
+    "cheat",
+    "native",
+    "process-injection",
+    "rop-gadget",
+    "memset",
+    "msvcrt"
+  ],
+  "author": "Cheatron",
+  "homepage": "https://github.com/Cheatron/cheatron-nthread#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cheatron/cheatron-nthread.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Cheatron/cheatron-nthread/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "bun run build",
+    "test": "bun test",
+    "lint": "eslint \"{src,tests}/**/*.ts\" --cache",
+    "lint:fix": "eslint \"{src,tests}/**/*.ts\" --fix",
+    "format": "prettier --write \"{src,tests}/**/*.ts\"",
+    "format:check": "prettier --check \"{src,tests}/**/*.ts\""
+  },
+  "dependencies": {
+    "@cheatron/keystone": "^1.0.1",
+    "@cheatron/native": "^1.2.6"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/bun": "latest",
+    "eslint": "^10.0.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.3.0",
+    "prettier": "^3.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.0"
+  }
+}
