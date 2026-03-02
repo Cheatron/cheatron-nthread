@@ -125,7 +125,6 @@ export class NThread {
     // happens only on success.
     let handle: Native.HANDLE;
     let tid: number;
-    let wasRegistered = false;
 
     if (thread instanceof Native.Thread) {
       handle = thread.rawHandle;
@@ -134,12 +133,6 @@ export class NThread {
       const sourceThread = Native.Thread.open(thread, this.processId);
       handle = sourceThread.rawHandle;
       tid = sourceThread.tid;
-      // Transfer handle ownership to CapturedThread: unregister from the
-      // source's FinalizationRegistry so GC won't close the shared handle.
-      wasRegistered = sourceThread.isRegistered;
-      if (wasRegistered) {
-        sourceThread.unregisterHandle();
-      }
     }
 
     const captured = new CapturedThread(
@@ -222,20 +215,8 @@ export class NThread {
       }
 
       nthreadLog.info(`Successfully injected into thread ${captured.tid}`);
-
-      // Inject succeeded — register CapturedThread for GC-based cleanup
-      // so the handle is closed even if the caller forgets to call close().
-      if (wasRegistered) {
-        captured.registerHandle();
-      }
-
       return [proxy, captured];
     } catch (err) {
-      // Inject failed — re-register CapturedThread so the handle is still
-      // cleaned up by GC, then release the thread state.
-      if (wasRegistered) {
-        captured.registerHandle();
-      }
       captured.release();
       throw err;
     }

@@ -25,7 +25,7 @@
 
     "@cheatron/log": ["@cheatron/log@1.0.1", "", { "dependencies": { "winston": "3.19.0", "winston-daily-rotate-file": "^5.0.0" } }, "sha512-vhOpXGhWXv5c3IgUjOaGy2jcqJU95ZIroRrIgiz7/e4/u8ce/0uj8ttxUkrXRqwpkKWk/zcNg0dbpKrv3/4xww=="],
 
-    "@cheatron/native": ["@cheatron/native@1.2.14", "", { "dependencies": { "@cheatron/keystone": "^1.0.1", "@cheatron/log": "^1.0.1", "@cheatron/native-bindings": "^1.0.8" } }, "sha512-Vfhl0FtUekB8z6wFyHpsyNUjPEjj0uzwk3O0ddZVZQOTU1N5ufC8LvFrMIy+b9qoJnbObISh5GDox1kAQ7YHDw=="],
+    "@cheatron/native": ["@cheatron/native@1.3.0", "", { "dependencies": { "@cheatron/keystone": "^1.0.1", "@cheatron/log": "^1.0.1", "@cheatron/native-bindings": "^1.0.8" } }, "sha512-+TpF7DQAldmyIvH/ecH3uEDTlNpY5Rx9l2N9QdXVQ0yMWfzPBhh9pTbzPhB/+5j6C5FtrEo2sMved/mtbCJI7w=="],
 
     "@cheatron/native-bindings": ["@cheatron/native-bindings@1.0.8", "", { "dependencies": { "@cheatron/win32-ext": "^1.0.4" } }, "sha512-5qVjJln45qdxh8FQWpDMoXscfG3cF1ZOX8rYYEQtsdyLgKJ6GcdnnhUxNAZz3EK8nNPFDDLLZmgX1jAGxjNZ8w=="],
 

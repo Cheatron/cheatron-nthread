@@ -42,7 +42,7 @@ export class CapturedThread extends Native.Thread {
     regKey: GeneralPurposeRegs,
     sleepAddress: Native.NativePointer,
   ) {
-    super(handle, threadId, false);
+    super(handle, threadId);
     this.regKey = regKey;
     this.sleepAddress = sleepAddress;
   }
