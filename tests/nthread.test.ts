@@ -65,19 +65,29 @@ describe('NThread', () => {
       const [proxy, captured] = await nthread.inject(spawned.tid);
 
       try {
-        const str = 'Hello, NThread!';
-        const ptr = await nthread.allocString(proxy, str);
-        expect(ptr.address).not.toBe(0n);
+        // ASCII → resolveEncoding picks utf8 (1 byte/char + 1-byte null)
+        const asciiStr = 'Hello, NThread!';
+        const asciiPtr = await nthread.allocString(proxy, asciiStr);
+        expect(asciiPtr.address).not.toBe(0n);
+        const asciiBuf = process.memory.read(asciiPtr, asciiStr.length + 1);
+        expect(asciiBuf.toString('utf8', 0, asciiStr.length)).toBe(asciiStr);
+        expect(asciiBuf[asciiStr.length]).toBe(0);
+        await proxy.free(asciiPtr);
 
-        // utf16le: 2 bytes per char + 2-byte null terminator
-        const byteLen = (str.length + 1) * 2;
-        const buf = process.memory.read(ptr, byteLen);
-
-        expect(buf.toString('utf16le', 0, str.length * 2)).toBe(str);
-        // null terminator
-        expect(buf.readUInt16LE(str.length * 2)).toBe(0);
-
-        await proxy.free(ptr);
+        // Unicode → resolveEncoding picks utf16le (2-byte null terminator)
+        const unicodeStr = 'Merhaba, Dünya! 🌍';
+        const unicodePtr = await nthread.allocString(proxy, unicodeStr);
+        expect(unicodePtr.address).not.toBe(0n);
+        const unicodeEncoded = Buffer.from(unicodeStr, 'utf16le');
+        const unicodeBuf = process.memory.read(
+          unicodePtr,
+          unicodeEncoded.length + 2,
+        );
+        expect(unicodeBuf.toString('utf16le', 0, unicodeEncoded.length)).toBe(
+          unicodeStr,
+        );
+        expect(unicodeBuf.readUInt16LE(unicodeEncoded.length)).toBe(0);
+        await proxy.free(unicodePtr);
       } finally {
         await proxy.close();
         captured.close();

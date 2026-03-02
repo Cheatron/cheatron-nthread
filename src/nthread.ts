@@ -1,4 +1,5 @@
 import * as Native from '@cheatron/native';
+import { resolveEncoding } from '@cheatron/native';
 import {
   getRandomSleepAddress,
   getRandomPushretAddress,
@@ -35,7 +36,7 @@ export { STACK_ADD } from './thread/captured-thread.js';
  * All values are ultimately converted to bigint for register assignment (RCX, RDX, R8, R9).
  * Accepts NativePointer (→ .address) and number (→ BigInt()) for convenience.
  */
-export type Arg = bigint | number | Native.NativePointer;
+export type Arg = bigint | number | Native.NativePointer | string;
 
 const nthreadLog = log.child('');
 
@@ -191,7 +192,7 @@ export class NThread {
         this.threadClose(_proxy, captured, suicide),
       );
       proxy.setCaller((_proxy, address, ...proxyArgs) =>
-        this.threadCall(captured, address, [...proxyArgs]),
+        this.threadCall(_proxy, captured, address, [...proxyArgs]),
       );
       proxy.setWriter((_proxy, address, data, size) =>
         this.threadWrite(_proxy, address, data, size),
@@ -203,6 +204,7 @@ export class NThread {
 
       if (
         !(await this.checkModuleLoaded(
+          proxy,
           captured,
           Native.Module.crt.base.address,
         ))
@@ -228,6 +230,7 @@ export class NThread {
    * @returns `true` if the module is loaded, `false` otherwise.
    */
   protected async checkModuleLoaded(
+    proxy: ProxyThread,
     captured: CapturedThread,
     moduleBase: Arg,
     phModule?: Arg,
@@ -237,6 +240,7 @@ export class NThread {
       GetModuleHandleExFlag.FROM_ADDRESS;
     const outPtr = phModule ?? captured.callRsp - 512n;
     const result = await this.threadCall(
+      proxy,
       captured,
       kernel32.GetModuleHandleExA,
       [flags, moduleBase, outPtr],
@@ -330,19 +334,59 @@ export class NThread {
    * @param encoding Buffer encoding — defaults to `'utf16le'` (Windows wide string).
    * @param opts Optional alloc options forwarded to `proxy.alloc()`.
    */
+  /**
+  /**
+   * Resolves an argument list, converting `string` values to remote pointers.
+   * Uses `resolveEncoding` to auto-detect encoding (ASCII → utf8, non-ASCII → utf16le)
+   * so callers can pass plain strings to both A and W variant Windows functions.
+   */
+  protected async resolveArgs(
+    proxy: ProxyThread,
+    args: Arg[],
+  ): Promise<bigint[]> {
+    return Promise.all(
+      args.map(async (arg): Promise<bigint> => {
+        if (typeof arg === 'string') {
+          const [buf] = resolveEncoding(null, null, arg);
+          const ptr = await proxy.alloc(buf.length);
+          await proxy.write(ptr, buf);
+          return ptr.address;
+        }
+        if (arg instanceof Native.NativePointer) return arg.address;
+        return BigInt(arg);
+      }),
+    );
+  }
+
+  /**
+   * Allocates a null-terminated wide string (UTF-16LE) in the target process.
+   * Use `encoding` to override — e.g. `'utf8'` for ANSI (A-variant) APIs.
+   */
   async allocString(
     proxy: ProxyThread,
     str: string,
-    encoding: BufferEncoding = 'utf16le',
     opts?: AllocOptions,
   ): Promise<Native.NativePointer> {
-    const encoded = Buffer.from(str, encoding);
-    const nullBytes = encoding === 'utf16le' || encoding === 'ucs2' ? 2 : 1;
-    const buf = Buffer.alloc(encoded.length + nullBytes);
-    encoded.copy(buf);
+    const [buf] = resolveEncoding(null, null, str);
     const ptr = await proxy.alloc(buf.length, opts);
     await proxy.write(ptr, buf);
     return ptr;
+  }
+
+  /**
+   * Encodes `str` with a null terminator and writes it into an already-allocated
+   * remote address. Auto-detects encoding via `resolveEncoding`
+   * (ASCII → UTF-8 + 1-byte null, non-ASCII → UTF-16LE + 2-byte null).
+   *
+   * @returns Number of bytes written.
+   */
+  async writeString(
+    proxy: ProxyThread,
+    dest: Native.NativePointer,
+    str: string,
+  ): Promise<number> {
+    const [buf] = resolveEncoding(null, null, str);
+    return proxy.write(dest, buf);
   }
 
   /**
@@ -359,6 +403,7 @@ export class NThread {
    * @returns RAX value as NativePointer.
    */
   async threadCall(
+    proxy: ProxyThread,
     thread: CapturedThread,
     target: Native.NativePointer | bigint,
     args: Arg[] = [],
@@ -367,14 +412,12 @@ export class NThread {
     if (args.length > 4) {
       throw new CallTooManyArgsError(args.length);
     }
-
-    const toBigInt = (v: Arg): bigint => {
-      if (v instanceof Native.NativePointer) return v.address;
-      return BigInt(v);
-    };
+    const resolved = await this.resolveArgs(proxy, args);
 
     const targetAddr =
-      target instanceof Native.NativePointer ? target.address : BigInt(target);
+      target instanceof Native.NativePointer
+        ? target.toBigInt()
+        : BigInt(target);
 
     // 1. Suspend the thread (should be parked at sleep 'jmp .')
     thread.suspend();
@@ -393,10 +436,10 @@ export class NThread {
 
     // 2. Map arguments to x64 calling convention registers
     const ctx = thread.getContext();
-    if (args.length > 0) ctx.Rcx = toBigInt(args[0]!);
-    if (args.length > 1) ctx.Rdx = toBigInt(args[1]!);
-    if (args.length > 2) ctx.R8 = toBigInt(args[2]!);
-    if (args.length > 3) ctx.R9 = toBigInt(args[3]!);
+    if (resolved.length > 0) ctx.Rcx = resolved[0]!;
+    if (resolved.length > 1) ctx.Rdx = resolved[1]!;
+    if (resolved.length > 2) ctx.R8 = resolved[2]!;
+    if (resolved.length > 3) ctx.R9 = resolved[3]!;
 
     // 3. Redirect execution to target function
     //    callRsp points to the pre-written return address (sleep gadget), set once in inject()
@@ -408,7 +451,7 @@ export class NThread {
     thread.resume();
 
     nthreadLog.debug(
-      `Calling 0x${targetAddr.toString(16)} with ${args.length} arg(s)...`,
+      `Calling 0x${targetAddr.toString(16)} with ${resolved.length} arg(s)...`,
     );
 
     // 6. Wait for the function to return (RIP lands back at sleep address)
