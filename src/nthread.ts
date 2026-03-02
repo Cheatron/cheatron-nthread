@@ -8,10 +8,13 @@ import { log } from './logger';
 import { ProxyThread } from './thread/proxy-thread.js';
 import { CapturedThread } from './thread/captured-thread.js';
 import { crt } from './crt.js';
+import { kernel32 } from './kernel32.js';
+import { GetModuleHandleExFlag } from '@cheatron/win32-ext';
 import {
   NoSleepAddressError,
   NoPushretAddressError,
   InjectTimeoutError,
+  MsvcrtNotLoadedError,
   CallTooManyArgsError,
   CallRipMismatchError,
   CallTimeoutError,
@@ -115,80 +118,130 @@ export class NThread {
   async inject(
     thread: Native.Thread | number,
   ): Promise<[ProxyThread, CapturedThread]> {
-    const captured = new CapturedThread(
-      thread,
-      this.regKey,
-      this.sleepAddress,
-      this.processId,
-    );
+    // Resolve handle + tid. Keep the source object alive in scope so the GC
+    // happens only on success.
+    let handle: Native.HANDLE;
+    let tid: number;
 
-    captured.suspend();
-
-    captured.fetchContext();
-    captured.savedContext = captured.getContext();
-
-    // Preserve original values to restore them later
-    const targetReg = captured.savedContext[this.regKey];
-    const rip = captured.savedContext.Rip;
-    const rsp = captured.savedContext.Rsp;
-
-    // Hijack:
-    // RIP -> [push reg; ret]  (The pivot)
-    // REG -> [jmp .]          (The final destination)
-    // pushret will 'push sleep; ret' → sleep addr lands at [stackBegin - 8]
-    // call() later sets RSP to that same address so 'ret' pops sleep again.
-    const stackBegin = captured.calcStackBegin(BigInt(rsp));
-    captured.callRsp = stackBegin - 8n;
-
-    captured.setRIP(this.pushretAddress.address);
-    captured.setRSP(stackBegin);
-    captured.setTargetReg(this.sleepAddress.address);
-
-    captured.applyContext();
-    captured.resume();
-
-    nthreadLog.info(
-      `Waiting for thread ${captured.tid} to reach ${this.sleepAddress}...`,
-    );
-
-    // Poll until Rip matches our infinite loop address
-    const res = await captured.wait(5000);
-    if (res != Native.WaitReturn.OBJECT_0) {
-      throw new InjectTimeoutError(res);
+    if (thread instanceof Native.Thread) {
+      handle = thread.rawHandle;
+      tid = thread.tid;
+    } else {
+      const sourceThread = Native.Thread.open(thread, this.processId);
+      handle = sourceThread.rawHandle;
+      tid = sourceThread.tid;
     }
 
-    // Refresh context now that we are stably 'parked' at sleepAddress
-    captured.savedContext = captured.getContext();
-
-    // Restore original state into our local copy so we can resume naturally later
-    captured.savedContext[this.regKey] = targetReg;
-    captured.savedContext.Rip = rip;
-    captured.savedContext.Rsp = rsp;
-
-    // Ensure we capture integer and control registers for maximum control
-    captured.latestContext.ContextFlags =
-      Native.ContextFlags.INTEGER | Native.ContextFlags.CONTROL;
-
-    const proxy = new ProxyThread((_proxy, suicide) =>
-      this.threadClose(_proxy, captured, suicide),
+    const captured = new CapturedThread(
+      handle,
+      tid,
+      this.regKey,
+      this.sleepAddress,
     );
-    /*proxy.setReader((_proxy, address, size) =>
-      Promise.resolve(Native.currentProcess.memory.read(address, size)),
-    );*/
-    proxy.setCaller((_proxy, address, ...proxyArgs) =>
-      this.threadCall(captured, address, [...proxyArgs]),
-    );
-    proxy.setWriter((_proxy, address, data, size) =>
-      this.threadWrite(_proxy, address, data, size),
-    );
-    proxy.setAllocer((_proxy, size, opts) =>
-      this.threadAlloc(_proxy, size, opts),
-    );
-    proxy.setFreer((_proxy, ptr) => this.threadFree(_proxy, ptr));
 
-    nthreadLog.info(`Successfully injected into thread ${captured.tid}`);
+    try {
+      captured.suspend();
 
-    return [proxy, captured];
+      captured.fetchContext();
+      captured.savedContext = captured.getContext();
+
+      // Preserve original values to restore them later
+      const targetReg = captured.savedContext[this.regKey];
+      const rip = captured.savedContext.Rip;
+      const rsp = captured.savedContext.Rsp;
+
+      // Hijack:
+      // RIP -> [push reg; ret]  (The pivot)
+      // REG -> [jmp .]          (The final destination)
+      // pushret will 'push sleep; ret' → sleep addr lands at [stackBegin - 8]
+      // call() later sets RSP to that same address so 'ret' pops sleep again.
+      const stackBegin = captured.calcStackBegin(BigInt(rsp));
+      captured.callRsp = stackBegin - 8n;
+
+      captured.setRIP(this.pushretAddress.address);
+      captured.setRSP(stackBegin);
+      captured.setTargetReg(this.sleepAddress.address);
+
+      captured.applyContext();
+      captured.resume();
+
+      nthreadLog.info(
+        `Waiting for thread ${captured.tid} to reach ${this.sleepAddress}...`,
+      );
+
+      // Poll until Rip matches our infinite loop address
+      const res = await captured.wait(5000);
+      if (res != Native.WaitReturn.OBJECT_0) {
+        throw new InjectTimeoutError(res);
+      }
+
+      // Refresh context now that we are stably 'parked' at sleepAddress
+      captured.savedContext = captured.getContext();
+
+      // Restore original state into our local copy so we can resume naturally later
+      captured.savedContext[this.regKey] = targetReg;
+      captured.savedContext.Rip = rip;
+      captured.savedContext.Rsp = rsp;
+
+      // Ensure we capture integer and control registers for maximum control
+      captured.latestContext.ContextFlags =
+        Native.ContextFlags.INTEGER | Native.ContextFlags.CONTROL;
+
+      const proxy = new ProxyThread((_proxy, suicide) =>
+        this.threadClose(_proxy, captured, suicide),
+      );
+      proxy.setCaller((_proxy, address, ...proxyArgs) =>
+        this.threadCall(captured, address, [...proxyArgs]),
+      );
+      proxy.setWriter((_proxy, address, data, size) =>
+        this.threadWrite(_proxy, address, data, size),
+      );
+      proxy.setAllocer((_proxy, size, opts) =>
+        this.threadAlloc(_proxy, size, opts),
+      );
+      proxy.setFreer((_proxy, ptr) => this.threadFree(_proxy, ptr));
+
+      if (
+        !(await this.checkModuleLoaded(
+          captured,
+          Native.Module.crt.base.address,
+        ))
+      ) {
+        throw new MsvcrtNotLoadedError();
+      }
+
+      nthreadLog.info(`Successfully injected into thread ${captured.tid}`);
+      return [proxy, captured];
+    } catch (err) {
+      captured.release();
+      throw err;
+    }
+  }
+
+  /**
+   * Checks whether the module owning `moduleBase` is still loaded in the target
+   * process. Uses `GetModuleHandleExA` with `FROM_ADDRESS | UNCHANGED_REFCOUNT`
+   * so the reference count is not bumped. The output HMODULE is written to a
+   * scratch slot on the hijack stack (`callRsp - 512`) — only the return value
+   * matters.
+   *
+   * @returns `true` if the module is loaded, `false` otherwise.
+   */
+  protected async checkModuleLoaded(
+    captured: CapturedThread,
+    moduleBase: Arg,
+    phModule?: Arg,
+  ): Promise<boolean> {
+    const flags =
+      GetModuleHandleExFlag.UNCHANGED_REFCOUNT |
+      GetModuleHandleExFlag.FROM_ADDRESS;
+    const outPtr = phModule ?? captured.callRsp - 512n;
+    const result = await this.threadCall(
+      captured,
+      kernel32.GetModuleHandleExA,
+      [flags, moduleBase, outPtr],
+    );
+    return result.address !== 0n;
   }
 
   /** Writes data to the target process; dispatches NativePointer vs Buffer. */

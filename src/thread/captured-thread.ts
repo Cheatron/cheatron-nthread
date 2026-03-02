@@ -37,23 +37,12 @@ export class CapturedThread extends Native.Thread {
    * @param processId Optional process ID for diagnostics and logging.
    */
   constructor(
-    thread: Native.Thread | number,
+    handle: Native.HANDLE,
+    threadId: number,
     regKey: GeneralPurposeRegs,
     sleepAddress: Native.NativePointer,
-    processId?: number,
   ) {
-    let threadObject: Native.Thread;
-    if (thread instanceof Native.Thread) {
-      threadObject = thread;
-    } else {
-      threadObject = Native.Thread.open(thread, processId);
-    }
-
-    const rawHandle = threadObject.rawHandle;
-    // Unregister original so CapturedThread owns the lifecycle via super()
-    Native.handleRegistry.unregister(threadObject);
-    super(rawHandle, threadObject.tid, true);
-
+    super(handle, threadId, false);
     this.regKey = regKey;
     this.sleepAddress = sleepAddress;
   }

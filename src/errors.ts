@@ -31,6 +31,12 @@ export class InjectTimeoutError extends InjectError {
   }
 }
 
+export class MsvcrtNotLoadedError extends InjectError {
+  constructor() {
+    super("msvcrt.dll is not loaded in the target thread's process");
+  }
+}
+
 // ── Call errors ───────────────────────────────────────────────────────────────
 
 export class CallError extends NThreadError {
