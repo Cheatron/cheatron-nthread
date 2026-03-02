@@ -14,23 +14,36 @@
 NThread reuses two tiny instruction sequences (gadgets) already present in loaded modules:
 
 | Gadget | Pattern | Purpose |
-|--------|---------|--------|
+|--------|---------|---------|
 | **Sleep** | `jmp .` (`EB FE`) | Parks the thread in an infinite loop |
 | **Pivot** | `push reg; ret` | Redirects `RIP` to the sleep gadget |
 
 Hijack sequence: suspend → capture context → redirect RIP through pivot → spin until RIP lands on sleep gadget. No shellcode, no remote allocation — just register writes.
+
+```
+suspend thread
+    → save full register context
+    → set RIP = pushret gadget
+    → set RSP = safe scratch area (current RSP − 8192, 16-aligned)
+    → set target register = sleep address
+    → apply context → resume
+    → poll until RIP == sleep address
+    → thread is now parked and ready for commands
+```
 
 ---
 
 ## Features
 
 - **No code injection** — reuses gadgets in `ntdll`, `kernel32`, `kernelbase`, `msvcrt`
-- **No `WriteProcessMemory`** — memory ops are performed by hijacking the target thread to call its own `msvcrt` functions
-- **Auto-discovery** — scans modules lazily via `Module.scan()`
+- **No `WriteProcessMemory`** — memory ops use the target thread's own `msvcrt` functions
+- **Auto-discovery** — scans loaded modules lazily via `Module.scan()`
 - **Reversible** — saves full register context before hijacking; restores on `proxy.close()`
-- **CRT bridge** — resolves `msvcrt!malloc`, `calloc`, `memset`, `fwrite`, etc. and calls them *from inside the target thread*
-- **Write optimization** — `romem` tracks known region contents and lets `write()` skip unchanged bytes automatically
-- **Heap allocator** — `NThreadHeap` pre-allocates a single heap block in the target and sub-allocates from it, minimising round-trips
+- **CRT bridge** — resolves `msvcrt` exports (`malloc`, `calloc`, `memset`, `fopen`, `fread`, etc.) and calls them *from inside the target thread*
+- **String args** — pass strings directly to `proxy.call()`, automatically allocated and freed
+- **Write optimization** — `romem` tracks known region contents and skips unchanged bytes automatically
+- **Heap allocator** — `NThreadHeap` pre-allocates a heap block in the target and sub-allocates from it, minimising CRT round-trips
+- **File channel** — `NThreadFile` replaces RPM/WPM with bidirectional filesystem I/O through a single temp file
 
 ---
 
@@ -44,12 +57,12 @@ bun add @cheatron/nthread
 
 ## Quick Start
 
+### Basic — `NThread`
+
 ```typescript
-import { NThread, createReadOnlyMemory } from '@cheatron/nthread';
+import { NThread, crt } from '@cheatron/nthread';
 
 const nthread = new NThread();
-
-// Hijack an existing thread by TID
 const [proxy, captured] = await nthread.inject(tid);
 
 // Call a function inside the target thread (x64 calling convention)
@@ -58,9 +71,6 @@ const ptr = await proxy.call(crt.malloc, 1024n);
 // Write memory via hijacked memset calls
 await proxy.write(ptr, Buffer.from([0xDE, 0xAD, 0xBE, 0xEF]));
 
-// Allocate and write a wide string in one step
-const strPtr = await proxy.allocString('Hello, target!');
-
 // Read memory back
 const buf = await proxy.read(ptr, 4);
 
@@ -68,9 +78,82 @@ const buf = await proxy.read(ptr, 4);
 await proxy.close();
 ```
 
+### Heap — `NThreadHeap`
+
+```typescript
+import { NThreadHeap } from '@cheatron/nthread';
+
+const nt = new NThreadHeap();
+const [proxy] = await nt.inject(tid);
+
+// alloc/free go through the local heap — fewer CRT calls
+const ptr = await proxy.alloc(256, { fill: 0 });
+await proxy.write(ptr, myData);
+await proxy.free(ptr);
+
+// Allocate and write a null-terminated string in one step
+const strPtr = await proxy.allocString('Hello, target!');
+
+await proxy.close(); // frees all heap blocks atomically
+```
+
+### File Channel — `NThreadFile`
+
+```typescript
+import { NThreadFile } from '@cheatron/nthread';
+
+const nt = new NThreadFile();
+const [proxy] = await nt.inject(tid);
+
+// read/write now go through a temp file — no RPM/WPM
+const ptr = await proxy.alloc(4096, { fill: 0 });
+await proxy.write(ptr, largeBuffer);          // fs.writeFileSync → fread
+const data = await proxy.read(ptr, 4096);     // fwrite + fflush → fs.readFileSync
+
+await proxy.close(); // closes FILE*, deletes temp file, destroys heaps, restores thread
+```
+
+### File I/O Helpers
+
+```typescript
+// Open a file in the target process
+const stream = await nthread.fileOpen(proxy, 'C:\\data\\log.txt', 'rb');
+
+// Read 512 bytes from the stream → local Buffer
+const buf = await nthread.fileRead(proxy, stream, 512);
+
+// Write data to a stream (string, Buffer, or NativeMemory)
+await nthread.fileWrite(proxy, stream, 'hello');
+
+// Flush and close
+await nthread.fileFlush(proxy, stream);
+await nthread.fileClose(proxy, stream);
+```
+
+### Read-Only Memory (`romem`)
+
+Tracks a known-content region as a `(remote, local)` pair. `proxy.write()` auto-detects overlaps and skips unchanged bytes.
+
+```typescript
+import { createReadOnlyMemory, unregisterReadOnlyMemory } from '@cheatron/nthread';
+
+const romem = await createReadOnlyMemory(proxy, 256); // calloc in target
+const data = Buffer.alloc(256);
+data.writeUInt32LE(0xDEADBEEF, 0);
+await proxy.write(romem.remote, data); // only the 4 changed bytes are written
+
+unregisterReadOnlyMemory(romem);
+```
+
 ---
 
-## Core Components
+## Class Hierarchy
+
+```
+NThread              — Orchestrator: inject, threadCall, writeMemory, CRT helpers
+  └─ NThreadHeap     — Heap sub-allocator per proxy (doubles up to maxSize)
+       └─ NThreadFile — Filesystem-based I/O channel (single temp file)
+```
 
 ### `NThread`
 
@@ -83,8 +166,13 @@ new NThread(processId?, sleepAddress?, pushretAddress?, regKey?)
 | Method | Description |
 |--------|-------------|
 | `inject(thread)` | Hijack a thread (TID or `Thread`), returns `[ProxyThread, CapturedThread]` |
-| `threadCall(thread, target, args, timeout)` | Execute a function call on a captured thread |
-| `writeMemory(thread, dest, source)` | Write via decomposed `memset` calls; romem-aware |
+| `allocString(proxy, str, opts?)` | Allocate + write a null-terminated string |
+| `writeString(proxy, dest, str)` | Write a null-terminated string to an existing address |
+| `fileOpen(proxy, path, mode)` | `fopen` in the target; auto-allocates/frees string args |
+| `fileWrite(proxy, stream, data)` | `fwrite` — accepts `Buffer`, `string`, or `NativeMemory` |
+| `fileRead(proxy, stream, dest)` | `fread` — `NativeMemory` or byte-count → `Buffer` |
+| `fileFlush(proxy, stream)` | `fflush` |
+| `fileClose(proxy, stream)` | `fclose` |
 
 Overridable hooks (for subclasses):
 - `threadClose(proxy, captured, suicide?)` — called by `proxy.close()`
@@ -93,18 +181,49 @@ Overridable hooks (for subclasses):
 
 ### `NThreadHeap`
 
-Subclass of `NThread`. Pre-allocates a single heap block (`calloc`) in the target and sub-allocates from it. The heap doubles on full (up to `maxSize`); oversized requests fall back to `msvcrt!malloc`.
+Subclass of `NThread`. Pre-allocates a heap block in the target and sub-allocates from it. The block doubles on full (up to `maxSize`); oversized requests fall back to `msvcrt!malloc`.
 
 ```typescript
 new NThreadHeap(heapSize?, maxSize?, processId?, sleepAddress?, pushretAddress?, regKey?)
-// Defaults: heapSize = 65536, maxSize = 65536 * 8
+// Defaults: heapSize = 65536, maxSize = 524288
 ```
 
-All proxy allocations are **freed atomically on `proxy.close()`**.
+All heap blocks are **freed atomically on `proxy.close()`**.
+
+### `NThreadFile`
+
+Subclass of `NThreadHeap`. Replaces `ReadProcessMemory`/`WriteProcessMemory` (and the base class's decomposed `memset` writes) with a bidirectional filesystem channel.
+
+```typescript
+new NThreadFile(heapSize?, maxSize?, processId?, sleepAddress?, pushretAddress?, regKey?)
+```
+
+- Opens a single temp file in the target with `fopen(path, "w+b")` during `inject()`
+- **Write** (attacker → target): write locally → `fseek(0)` + `fread` in target
+- **Read** (target → attacker): `fseek(0)` + `fwrite` + `fflush` in target → read locally
+- `proxy.close()` calls `fclose`, deletes the temp file, then destroys heaps and restores the thread
+
+### `ProxyThread`
+
+High-level interface returned by `inject()`. Each operation is a replaceable delegate.
+
+| Method | Description |
+|--------|-------------|
+| `read(address, size)` | Read memory from the target |
+| `write(address, data, size?)` | Write memory to the target |
+| `call(address, ...args)` | Call a function (up to 4 args: RCX, RDX, R8, R9) |
+| `alloc(size, opts?)` | Allocate memory (`AllocOptions`: `fill`, `readonly`, `address`) |
+| `free(ptr)` | Free memory |
+| `allocString(str, encoding?, opts?)` | Alloc + write null-terminated string (default `utf16le`) |
+| `close(suicide?)` | Release thread, or terminate with exit code |
+
+**Delegate setters**: `setReader`, `setWriter`, `setCaller`, `setCloser`, `setAllocer`, `setFreer` — replace any operation with a custom function.
+
+**CRT auto-binding**: All resolved `msvcrt` functions are bound as methods on the proxy (e.g. `proxy.malloc(size)`, `proxy.fopen(path, mode)`).
 
 ### `CapturedThread`
 
-Extends `Native.Thread`. Owns the hardware context cache, suspend tracking, and register manipulation for a single captured thread.
+Extends `Native.Thread`. Owns the hardware context cache, suspend tracking, and register manipulation.
 
 | Method | Description |
 |--------|-------------|
@@ -114,48 +233,77 @@ Extends `Native.Thread`. Owns the hardware context cache, suspend tracking, and 
 | `release()` | Restore saved context without closing handle |
 | `close()` | `release()` → drain suspends → close handle |
 
-### `ProxyThread`
-
-High-level interface for a captured thread. Each operation is a replaceable delegate.
+### `AllocOptions`
 
 ```typescript
-new ProxyThread(close: CloseFn, process?: Native.Process)
+interface AllocOptions {
+  fill?: number;                // byte value to fill allocated memory
+  readonly?: boolean;           // allocate in the readonly zone of the heap
+  address?: NativePointer;      // realloc mode: resize an existing allocation
+}
 ```
-
-| Method | Description |
-|--------|-------------|
-| `read(address, size)` | Read memory |
-| `write(address, data, size?)` | Write memory |
-| `call(address, ...args)` | Call a function |
-| `alloc(size, opts?)` | Allocate memory (`malloc`/`calloc`/realloc) |
-| `free(ptr)` | Free memory |
-| `allocString(str, encoding?, opts?)` | Alloc + write a string; null-terminated; default encoding `utf16le` |
-| `close(suicide?)` | Release the thread (or terminate with exit code) |
-| `setReader/setWriter/setCaller/setCloser/setAllocer/setFreer` | Replace delegates |
-
-### `globals.ts` — Gadget Registry
-
-Manages sleep and pushret gadget pools. Auto-discovery runs once lazily on first use, scanning `ntdll`, `kernel32`, `kernelbase`, `msvcrt`. Register priority: `Rbx → Rbp → Rdi → Rsi`.
-
-### `crt.ts` — CRT Bridge
-
-Resolves `msvcrt.dll` exports at load time (`malloc`, `calloc`, `free`, `memset`, `realloc`, `fopen`, `fread`, `fwrite`, `fflush`, `fclose`). All values are `NativePointer` — set as `RIP` on the hijacked thread.
 
 ---
 
-## Read-Only Memory (`romem`)
+## Gadget Auto-Discovery
 
-`romem` tracks a known-content region as a `(remote: NativePointer, local: Buffer)` pair. `proxy.write()` auto-detects overlaps and skips unchanged bytes.
+Gadgets are discovered lazily on first `inject()`. The scanner searches `ntdll`, `kernel32`, `kernelbase`, and `msvcrt` for:
+
+- **Sleep**: `EB FE` (`jmp .`)
+- **Pushret**: `push reg; ret` — register priority: `Rbx → Rbp → Rdi → Rsi` (least-clobbered by `msvcrt` calls)
+
+You can also provide explicit gadget addresses in the constructor if you prefer manual control:
 
 ```typescript
-import { createReadOnlyMemory, unregisterReadOnlyMemory } from '@cheatron/nthread';
+const nt = new NThread(pid, mySleepAddr, myPushretAddr, 'Rbx');
+```
 
-const romem = await createReadOnlyMemory(proxy, 256); // calloc in target
-const data = Buffer.alloc(256);
-data.writeUInt32LE(0xDEADBEEF, 0);
-await proxy.write(romem.remote, data); // only changed bytes are written
+---
 
-unregisterReadOnlyMemory(romem);
+## CRT Bridge
+
+`crt.ts` resolves `msvcrt.dll` exports at load time. All values are `NativePointer` — used as `RIP` targets for `threadCall`.
+
+```typescript
+import { crt } from '@cheatron/nthread';
+
+crt.malloc   // msvcrt!malloc
+crt.calloc   // msvcrt!calloc
+crt.realloc  // msvcrt!realloc
+crt.free     // msvcrt!free
+crt.memset   // msvcrt!memset
+crt.fopen    // msvcrt!fopen
+crt.fread    // msvcrt!fread
+crt.fwrite   // msvcrt!fwrite
+crt.fseek    // msvcrt!fseek
+crt.fflush   // msvcrt!fflush
+crt.fclose   // msvcrt!fclose
+```
+
+---
+
+## Error Hierarchy
+
+```
+NThreadError
+  ├─ NoSleepAddressError      — no sleep gadget found
+  ├─ NoPushretAddressError     — no pushret gadget found
+  ├─ InjectError
+  │    ├─ InjectTimeoutError   — thread didn't reach sleep in time
+  │    └─ MsvcrtNotLoadedError — msvcrt.dll not in target process
+  ├─ CallError
+  │    ├─ CallNotInjectedError — call before inject
+  │    ├─ CallTooManyArgsError — more than 4 args
+  │    ├─ CallRipMismatchError — RIP not at sleep before call
+  │    ├─ CallTimeoutError     — function didn't return in time
+  │    └─ CallThreadDiedError  — thread exited during call (e.g. ExitThread)
+  ├─ WriteError
+  │    └─ WriteSizeRequiredError — NativePointer write without size
+  ├─ AllocError
+  │    └─ ReallocNullError     — realloc with null address
+  ├─ FileError                 — fopen returned NULL
+  └─ GadgetError
+       └─ GadgetScanError      — pattern scan failed
 ```
 
 ---
@@ -165,7 +313,11 @@ unregisterReadOnlyMemory(romem);
 ```bash
 bun install
 bun run build
-wine /path/to/bun.exe test
+bun run lint
+bun run format
+
+# Tests require Wine (Windows x64 on Linux)
+wine /path/to/bun-windows-x64/bun.exe test
 ```
 
 ---
