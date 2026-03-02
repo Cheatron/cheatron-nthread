@@ -114,9 +114,10 @@ export class CapturedThread extends Native.Thread {
   /** Suspends the thread and increments internal counter */
   override suspend(): number {
     const result = super.suspend();
-    if (result) {
-      this.suspendCount++;
-    }
+    // super.suspend() throws on failure, so reaching here means success.
+    // SuspendThread returns the *previous* suspend count (0 when the thread
+    // was running), which is falsy — always increment.
+    this.suspendCount++;
     return result;
   }
 
