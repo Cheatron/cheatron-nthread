@@ -16,6 +16,7 @@ export interface CRTFunctions {
   fflush: Native.NativePointer;
   fclose: Native.NativePointer;
   fread: Native.NativePointer;
+  fseek: Native.NativePointer;
   free: Native.NativePointer;
 }
 
@@ -43,5 +44,6 @@ export const crt: CRTFunctions = {
   fflush: get('fflush'),
   fclose: get('fclose'),
   fread: get('fread'),
+  fseek: get('fseek'),
   free: get('free'),
 };

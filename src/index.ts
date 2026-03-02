@@ -4,6 +4,7 @@ export * from './logger.js';
 export * from './thread/captured-thread.js';
 export * from './nthread.js';
 export * from './nthread-heap.js';
+export * from './nthread-file.js';
 export * from './globals.js';
 export * from './thread/proxy-thread.js';
 export * from './memory/romem.js';

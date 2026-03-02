@@ -27,13 +27,14 @@ captured.wait() loop:
 return [new ProxyThread(closeFn), captured]
 ```
 
-## 2. Architecture: Three-Class Composition
+## 2. Architecture: Four-Class Composition
 
 ### Folder structure
 ```
 src/
   nthread.ts          — Orchestrator (NThread class + Arg type)
   nthread-heap.ts     — NThreadHeap subclass
+  nthread-file.ts     — NThreadFile subclass (filesystem I/O)
   crt.ts              — msvcrt resolver
   globals.ts          — gadget registry
   errors.ts
@@ -172,7 +173,7 @@ Two internal pools:
 
 Resolves `msvcrt.dll` exports at module load time via `Native.Module.crt.getProcAddress(name)`. All values are `NativePointer`.
 
-Exported functions: `fopen`, `memset`, `malloc`, `calloc`, `fwrite`, `fflush`, `fclose`, `fread`, `realloc`, `free`.
+Exported functions: `fopen`, `memset`, `malloc`, `calloc`, `fwrite`, `fflush`, `fclose`, `fread`, `fseek`, `realloc`, `free`.
 
 **Important**: Top-level initialization — depends on `@cheatron/native`'s module graph being fully resolved.
 
@@ -181,17 +182,51 @@ Exported functions: `fopen`, `memset`, `malloc`, `calloc`, `fwrite`, `fflush`, `
 ### `memset`-write
 Calls target thread's `msvcrt!memset`. Buffer is decomposed into **runs of equal bytes** — one `memset` call per run. Safe-write variant skips bytes matching a `local_cpy` snapshot.
 
-### `memset`-write vs tunnel-write decision
-Threshold `3`: diffs shorter than 3 bytes use `memset`. Tunnel write (not yet ported) is used for longer diffs when a tunnel is available.
+### `memset`-write vs file-channel-write decision
+When using `NThreadFile`, all writes go through the filesystem channel (single `fread` call). The base `NThread` / `NThreadHeap` classes use the decomposed `memset` strategy instead.
 
-## 6. Filesystem Tunnel (`nttunnel`) — Not Yet Ported
+### `NThreadFile` (`nthread-file.ts`) — Filesystem I/O Subclass
 
-Bidirectional memory I/O entirely through the filesystem — no `ReadProcessMemory`, no `WriteProcessMemory`. C implementation only. TypeScript port planned.
+Subclass of `NThreadHeap`. Replaces `ReadProcessMemory`/`WriteProcessMemory` (and the base class's decomposed `memset` write strategy) with bidirectional filesystem channels.
+
+**Inheritance**: `NThread` → `NThreadHeap` → `NThreadFile`
+
+**Constants**: `DEFAULT_FILE_MAX_TRANSFER = 1048576` (1 MiB) — reserved for future path-rotation support.
+
+**Per-proxy state** (`FileChannelState`): `filePath` (local temp file path), `stream` (`FILE*` handle kept open in the target).
+
+**`inject()` override**:
+1. Calls `super.inject()` to perform the base hijack + heap setup.
+2. Generates a unique temp file path via `crypto.randomBytes`.
+3. Opens the file in the target with `fopen(path, "w+b")` — the `FILE*` is kept open.
+4. Overrides `proxy.setWriter()` → `fileChannelWrite` and `proxy.setReader()` → `fileChannelRead`.
+5. On failure, calls `proxy.close()` to clean up the base injection.
+
+**`fileChannelWrite` (attacker → target)**:
+1. Writes data to local temp file (`fs.writeFileSync` — truncates).
+2. `fseek(stream, 0, SEEK_SET)` to reset the target's stream position.
+3. `fread(dest, 1, size, stream)` reads from the file into the target address.
+
+**`fileChannelRead` (target → attacker)**:
+1. `fseek(stream, 0, SEEK_SET)` to reset the target's stream position.
+2. `fwrite(src, 1, size, stream)` dumps target memory to the file.
+3. `fflush(stream)` ensures data reaches disk.
+4. Reads the file locally (`fs.readFileSync`).
+
+**`threadClose` override**: Closes the `FILE*` stream via `fclose`, deletes the temp file (best-effort), then delegates to `super.threadClose()` (heap destruction + thread restore).
+
+**Note**: The file channel bypasses the romem snapshot system entirely. Read-only memory regions are not snapshot-tracked when using file-channel writes — the full buffer is transferred every time. Path rotation (reusing new file paths after `max_transfer` bytes) is not yet implemented.
+
+## 6. Filesystem Channel — Design Notes
+
+Bidirectional memory I/O entirely through the filesystem — no `ReadProcessMemory`, no `WriteProcessMemory`.
 
 Architecture:
-- **Write channel** (attacker → target): attacker writes temp file A → hijacked thread calls `msvcrt!fread`
-- **Read channel** (target → attacker): hijacked thread calls `msvcrt!fwrite` → attacker reads temp file B
-- Path rotation after `max_transfer` bytes to avoid seeking
+- Single temp file opened once with `"w+b"` (read+write) during `inject()`, kept open as `FILE*`.
+- **Write channel** (attacker → target): attacker writes temp file locally → `fseek(0)` + `fread` in target
+- **Read channel** (target → attacker): `fseek(0)` + `fwrite` + `fflush` in target → attacker reads temp file
+- No per-operation `fopen`/`fclose` overhead — only `fseek` resets the position
+- Path rotation after `max_transfer` bytes (not yet implemented)
 
 ## 7. Memory Region Abstraction (`ntmem`) — Partially Ported
 

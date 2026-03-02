@@ -74,6 +74,12 @@ export class ProxyThread {
   ) => Promise<Native.NativePointer>;
   /** `msvcrt!realloc(ptr, size)` */
   declare realloc: (ptr: Arg, size: Arg) => Promise<Native.NativePointer>;
+  /** `msvcrt!fseek(stream, offset, origin)` — returns 0 on success */
+  declare fseek: (
+    stream: Arg,
+    offset: Arg,
+    origin: Arg,
+  ) => Promise<Native.NativePointer>;
   // Note: `free` is a first-class delegate method below — not a CRT auto-binding.
 
   private _read: ReadMemoryFn;
