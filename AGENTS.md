@@ -36,6 +36,7 @@ src/
   nthread-heap.ts     — NThreadHeap subclass
   nthread-file.ts     — NThreadFile subclass (filesystem I/O)
   crt.ts              — msvcrt resolver
+  kernel32.ts         — kernel32 resolver
   globals.ts          — gadget registry
   errors.ts
   logger.ts
@@ -52,6 +53,7 @@ tests/
   crt.test.ts
   heap.test.ts
   nthread.test.ts
+  nthread-file.test.ts
   romem.test.ts
 ```
 
@@ -59,7 +61,7 @@ tests/
 
 Lightweight orchestrator. Does **not** extend `Native.Thread`. Holds resolved gadget addresses (`sleepAddress`, `pushretAddress`, `regKey`) and an optional `processId` for diagnostics.
 
-**`export type Arg = bigint | number | Native.NativePointer`** — defined here, re-exported from `index.ts`.
+**`export type Arg = bigint | number | Native.NativePointer | string`** — defined here, re-exported from `index.ts`. String arguments are auto-resolved to remote pointers via `resolveArgs` (ASCII → utf8, non-ASCII → utf16le).
 
 **Constructor**: `(processId?, sleepAddress?, pushretAddress?, regKey?)` — resolves gadgets from the global registry if not explicitly provided.
 
@@ -266,7 +268,8 @@ Typescript-native write optimization. Tracks `(remote: NativePointer, local: Buf
 ### Test structure
 - `tests/crt.test.ts` — verifies CRT function pointer resolution
 - `tests/heap.test.ts` — `Heap` slab allocator: alloc, free, reuse, write, destroy
-- `tests/nthread.test.ts` — inject into `jmp .` thread, verify context, `proxy.write()`, `ExitThread(42)` via `proxy.call()`
+- `tests/nthread.test.ts` — inject into `jmp .` thread, verify context, `proxy.write()`, `allocString`, `ExitThread(42)` via `proxy.call()`
+- `tests/nthread-file.test.ts` — file channel inject, write/read through file channel, large buffer, `allocString`, `proxy.close()` cleanup
 - `tests/romem.test.ts` — `createReadOnlyMemory`, skip-write for identical data, snapshot updates, `unregisterReadOnlyMemory`
 
 
