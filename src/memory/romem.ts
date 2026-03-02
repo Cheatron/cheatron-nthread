@@ -9,8 +9,8 @@ import { crt } from '../crt.js';
  * this lets writeMemory skip unchanged bytes automatically.
  */
 export interface ReadOnlyMemory {
-  /** Remote address in the target process (allocated via calloc) */
-  readonly remote: Native.NativePointer;
+  /** Remote address in the target process (allocated via calloc, size included) */
+  readonly remote: Native.NativeMemory;
   /** Local copy of the data — always mirrors what is on the remote side */
   readonly local: Buffer;
 }
@@ -35,8 +35,9 @@ export async function createReadOnlyMemory(
     throw new Error(`calloc(1, ${size}) returned NULL`);
   }
 
+  const remote = Native.NativeMemory.createFromPointer(ptr, undefined, size);
   const local = Buffer.alloc(size); // zero-filled — matches calloc
-  const romem: ReadOnlyMemory = { remote: ptr, local };
+  const romem: ReadOnlyMemory = { remote, local };
   regions.push(romem);
   return romem;
 }
@@ -50,7 +51,7 @@ export async function createReadOnlyMemory(
  * @param local  Buffer that mirrors the remote contents exactly.
  */
 export function registerReadOnlyMemory(
-  remote: Native.NativePointer,
+  remote: Native.NativeMemory,
   local: Buffer,
 ): ReadOnlyMemory {
   const romem: ReadOnlyMemory = { remote, local };

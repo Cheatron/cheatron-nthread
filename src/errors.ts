@@ -105,6 +105,31 @@ export class CallThreadDiedError extends CallError {
 
 export class WriteError extends NThreadError {}
 
+export class WriteSizeRequiredError extends WriteError {
+  constructor() {
+    super('Size must be specified when writing from a NativePointer source');
+  }
+}
+
+// ── Alloc errors ─────────────────────────────────────────────────────────────
+
+export class AllocError extends NThreadError {}
+
+export class ReallocNullError extends AllocError {
+  public readonly address: bigint;
+  public readonly size: number;
+
+  constructor(address: bigint, size: number) {
+    super(`realloc(0x${address.toString(16)}, ${size}) returned NULL`);
+    this.address = address;
+    this.size = size;
+  }
+}
+
+// ── File I/O errors ───────────────────────────────────────────────────────────
+
+export class FileError extends NThreadError {}
+
 // ── Gadget errors ─────────────────────────────────────────────────────────────
 
 export class GadgetError extends NThreadError {}

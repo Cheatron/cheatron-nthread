@@ -28,7 +28,7 @@ export type AllocFn = (
   proxy: ProxyThread,
   size: number,
   opts?: AllocOptions,
-) => Promise<Native.NativePointer>;
+) => Promise<Native.NativeMemory>;
 export type FreeFn = (
   proxy: ProxyThread,
   ptr: Native.NativePointer,
@@ -128,17 +128,19 @@ export class ProxyThread {
           throw new Error(
             `realloc(0x${opts.address.address.toString(16)}, ${size}) returned NULL`,
           );
-        return ptr;
+        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
       }
       const fill = opts?.fill;
       if (fill === undefined) {
-        return this.malloc(BigInt(size));
+        const ptr = await this.malloc(BigInt(size));
+        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
       } else if (fill === 0) {
-        return this.calloc(1n, BigInt(size));
+        const ptr = await this.calloc(1n, BigInt(size));
+        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
       } else {
         const ptr = await this.malloc(BigInt(size));
         await this.memset(ptr.address, BigInt(fill & 0xff), BigInt(size));
-        return ptr;
+        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
       }
     };
 
@@ -195,9 +197,18 @@ export class ProxyThread {
     this._free = fn;
   }
 
-  /** Reads memory from the remote process */
-  read(address: Native.NativePointer, size: number): Promise<Buffer> {
-    return this._read(this, address, size);
+  /** Reads memory from the remote process. When `address` is a `NativeMemory`, `size` defaults to `address.size`. */
+  read(address: Native.NativeMemory): Promise<Buffer>;
+  read(address: Native.NativePointer, size: number): Promise<Buffer>;
+  read(address: Native.NativePointer, size?: number): Promise<Buffer> {
+    const sz =
+      size ??
+      (address instanceof Native.NativeMemory ? address.size : undefined);
+    if (sz === undefined)
+      throw new Error(
+        'read: size is required when address is not a NativeMemory',
+      );
+    return this._read(this, address, sz);
   }
 
   /** Writes memory into the remote process */
@@ -233,8 +244,10 @@ export class ProxyThread {
    * - `opts.fill > 0`                → `malloc(size)` + `memset(ptr, fill, size)`
    * - `opts.type`                    → zone hint for HeapPool (READONLY / READWRITE)
    * - `opts.address`                 → realloc mode: resize existing allocation
+   *
+   * Returns a `NativeMemory` so callers always know the allocation size.
    */
-  alloc(size: number, opts?: AllocOptions): Promise<Native.NativePointer> {
+  alloc(size: number, opts?: AllocOptions): Promise<Native.NativeMemory> {
     return this._alloc(this, size, opts);
   }
 

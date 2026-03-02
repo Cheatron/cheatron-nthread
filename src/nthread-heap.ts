@@ -101,7 +101,7 @@ export class NThreadHeap extends NThread {
     proxy: ProxyThread,
     size: number,
     opts?: AllocOptions,
-  ): Promise<Native.NativePointer> {
+  ): Promise<Native.NativeMemory> {
     if (opts?.address) {
       return this.reallocInternal(proxy, opts.address, size, opts);
     }
@@ -158,7 +158,7 @@ export class NThreadHeap extends NThread {
     proxy: ProxyThread,
     size: number,
     ro: boolean,
-  ): Promise<Native.NativePointer | null> {
+  ): Promise<Native.NativeMemory | null> {
     const s = this.getState(proxy);
 
     if (s.heap) {
@@ -217,7 +217,7 @@ export class NThreadHeap extends NThread {
     address: Native.NativePointer,
     newSize: number,
     opts?: AllocOptions,
-  ): Promise<Native.NativePointer> {
+  ): Promise<Native.NativeMemory> {
     const s = this.getState(proxy);
     const entry = s.allocations.get(address.address);
 

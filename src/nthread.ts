@@ -20,6 +20,8 @@ import {
   CallRipMismatchError,
   CallTimeoutError,
   CallThreadDiedError,
+  WriteSizeRequiredError,
+  ReallocNullError,
 } from './errors.js';
 import {
   findOverlappingRegion,
@@ -257,7 +259,7 @@ export class NThread {
   ): Promise<number> {
     if (data instanceof Native.NativePointer) {
       if (!size) {
-        throw new Error('Size must be specified when writing a pointer.');
+        throw new WriteSizeRequiredError();
       }
       await this.writeMemoryWithPointer(proxy, address, data, size);
       return size;
@@ -292,24 +294,24 @@ export class NThread {
     proxy: ProxyThread,
     size: number,
     opts?: AllocOptions,
-  ): Promise<Native.NativePointer> {
+  ): Promise<Native.NativeMemory> {
     if (opts?.address) {
       const ptr = await proxy.realloc(opts.address.address, BigInt(size));
       if (ptr.address === 0n)
-        throw new Error(
-          `realloc(0x${opts.address.address.toString(16)}, ${size}) returned NULL`,
-        );
-      return ptr;
+        throw new ReallocNullError(opts.address.address, size);
+      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
     }
     const fill = opts?.fill;
     if (fill === undefined) {
-      return proxy.malloc(BigInt(size));
+      const ptr = await proxy.malloc(BigInt(size));
+      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
     } else if (fill === 0) {
-      return proxy.calloc(1n, BigInt(size));
+      const ptr = await proxy.calloc(1n, BigInt(size));
+      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
     } else {
       const ptr = await proxy.malloc(BigInt(size));
       await proxy.memset(ptr.address, BigInt(fill & 0xff), BigInt(size));
-      return ptr;
+      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
     }
   }
 
@@ -366,7 +368,7 @@ export class NThread {
     proxy: ProxyThread,
     str: string,
     opts?: AllocOptions,
-  ): Promise<Native.NativePointer> {
+  ): Promise<Native.NativeMemory> {
     const [buf] = resolveEncoding(null, null, str);
     const ptr = await proxy.alloc(buf.length, opts);
     await proxy.write(ptr, buf);
@@ -387,6 +389,146 @@ export class NThread {
   ): Promise<number> {
     const [buf] = resolveEncoding(null, null, str);
     return proxy.write(dest, buf);
+  }
+
+  // ─── File I/O helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Opens a file in the target process via `msvcrt!fopen`.
+   * Both `path` and `mode` are automatically allocated as null-terminated ANSI
+   * strings and freed after the call.
+   *
+   * @returns `FILE*` pointer (`address === 0n` on failure).
+   */
+  async fileOpen(
+    proxy: ProxyThread,
+    path: string | Native.NativePointer,
+    mode: string | Native.NativePointer,
+  ): Promise<Native.NativePointer> {
+    const pathPtr =
+      typeof path === 'string' ? await this.allocString(proxy, path) : null;
+    const modePtr =
+      typeof mode === 'string' ? await this.allocString(proxy, mode) : null;
+    try {
+      const pathArg = pathPtr
+        ? pathPtr.address
+        : (path as Native.NativePointer).address;
+      const modeArg = modePtr
+        ? modePtr.address
+        : (mode as Native.NativePointer).address;
+      return await proxy.fopen(pathArg, modeArg);
+    } finally {
+      if (pathPtr) await proxy.free(pathPtr);
+      if (modePtr) await proxy.free(modePtr);
+    }
+  }
+
+  /**
+   * Writes data to an open `FILE*` stream via `msvcrt!fwrite`.
+   *
+   * **Two modes:**
+   * - `data: Buffer | string` — encodes locally, allocates a remote scratch buffer,
+   *   calls `fwrite`, then frees it automatically.
+   *   Strings are encoded as UTF-8 (raw bytes, no null terminator).
+   * - `data: NativeMemory` — already in the target process; byte count is taken
+   *   from `data.size` automatically.
+   *
+   * @returns Number of bytes written.
+   */
+  async fileWrite(
+    proxy: ProxyThread,
+    stream: Native.NativePointer,
+    data: Buffer | string | Native.NativeMemory,
+  ): Promise<number> {
+    if (data instanceof Native.NativeMemory) {
+      const result = await proxy.fwrite(
+        data.address,
+        1n,
+        BigInt(data.size),
+        stream.address,
+      );
+      return Number(result.address);
+    }
+    const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+    const ptr = await proxy.alloc(buf.length);
+    try {
+      await proxy.write(ptr, buf);
+      const result = await proxy.fwrite(
+        ptr.address,
+        1n,
+        BigInt(buf.length),
+        stream.address,
+      );
+      return Number(result.address);
+    } finally {
+      await proxy.free(ptr);
+    }
+  }
+
+  /**
+   * Reads bytes from a `FILE*` stream via `msvcrt!fread`.
+   *
+   * **Two modes:**
+   * - `dest: NativeMemory` — reads directly into an existing remote buffer;
+   *   byte count is taken from `dest.size` automatically. Returns number of bytes read.
+   * - `dest: number` (= byteCount) — allocates a remote scratch buffer,
+   *   calls `fread`, copies the result back as a local `Buffer`, then frees the scratch.
+   *
+   * `size` is always `1` — byte-granular I/O.
+   */
+  async fileRead(
+    proxy: ProxyThread,
+    stream: Native.NativePointer,
+    dest: Native.NativeMemory | number,
+  ): Promise<number | Buffer> {
+    if (dest instanceof Native.NativeMemory) {
+      const result = await proxy.fread(
+        dest.address,
+        1n,
+        BigInt(dest.size),
+        stream.address,
+      );
+      return Number(result.address);
+    }
+    // dest is a byte count — alloc internally and return a local Buffer
+    const byteCount = dest;
+    const ptr = await proxy.alloc(byteCount);
+    try {
+      const result = await proxy.fread(
+        ptr.address,
+        1n,
+        BigInt(byteCount),
+        stream.address,
+      );
+      const bytesRead = Number(result.address);
+      return await proxy.read(ptr.withSize(bytesRead));
+    } finally {
+      await proxy.free(ptr);
+    }
+  }
+
+  /**
+   * Flushes a `FILE*` stream via `msvcrt!fflush`.
+   * Returns `0` on success, non-zero on failure (mirrors fflush).
+   */
+  async fileFlush(
+    proxy: ProxyThread,
+    stream: Native.NativePointer,
+  ): Promise<number> {
+    const result = await proxy.fflush(stream.address);
+    return Number(result.address);
+  }
+
+  /**
+   * Closes a `FILE*` stream via `msvcrt!fclose`.
+   * Returns `0` on success, `EOF` on failure (mirrors fclose).
+   */
+  async fileClose(
+    proxy: ProxyThread,
+    stream: Native.NativePointer,
+  ): Promise<number> {
+    const result = await proxy.fclose(stream.address);
+    return Number(result.address);
   }
 
   /**

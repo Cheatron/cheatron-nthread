@@ -12,8 +12,8 @@ export const DEFAULT_HEAP_SIZE = 16384;
 
 /** Result of a heap allocation — pointer into the pre-allocated region */
 export interface HeapAlloc {
-  /** Remote address in the target process */
-  readonly remote: Native.NativePointer;
+  /** Remote address in the target process (includes allocation size) */
+  readonly remote: Native.NativeMemory;
   /** Size of this allocation */
   readonly size: number;
 }
@@ -120,7 +120,7 @@ export class Heap {
     }
 
     // Register the readonly zone as romem for snapshot-based write optimization
-    const roRemote = base;
+    const roRemote = new Native.NativeMemory(base.address, actualRoSize);
     const roLocal = Buffer.alloc(actualRoSize); // zero-filled — matches calloc
     const romem = registerReadOnlyMemory(roRemote, roLocal);
 
@@ -253,8 +253,9 @@ export class Heap {
     const freeIdx = Heap.findFreeBlock(this.roFreeList, size);
     if (freeIdx !== -1) {
       const offset = Heap.splitFreeBlock(this.roFreeList, freeIdx, size);
-      const remote = new Native.NativePointer(
+      const remote = new Native.NativeMemory(
         this.base.address + BigInt(offset),
+        size,
       );
       return { remote, size };
     }
@@ -266,8 +267,9 @@ export class Heap {
       );
     }
 
-    const remote = new Native.NativePointer(
+    const remote = new Native.NativeMemory(
       this.base.address + BigInt(this.roOffset),
+      size,
     );
     this.roOffset += size;
     return { remote, size };
@@ -290,8 +292,9 @@ export class Heap {
     const freeIdx = Heap.findFreeBlock(this.rwFreeList, size);
     if (freeIdx !== -1) {
       const offset = Heap.splitFreeBlock(this.rwFreeList, freeIdx, size);
-      const remote = new Native.NativePointer(
+      const remote = new Native.NativeMemory(
         this.base.address + BigInt(this.roSize) + BigInt(offset),
+        size,
       );
       return { remote, size };
     }
@@ -303,7 +306,10 @@ export class Heap {
       );
     }
 
-    const remote = this.base.add(BigInt(this.roSize) + BigInt(this.rwOffset));
+    const remote = new Native.NativeMemory(
+      this.base.address + BigInt(this.roSize) + BigInt(this.rwOffset),
+      size,
+    );
     this.rwOffset += size;
     return { remote, size };
   }
