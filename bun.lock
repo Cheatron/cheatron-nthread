@@ -6,7 +6,7 @@
       "name": "@cheatron/nthread",
       "dependencies": {
         "@cheatron/keystone": "^1.0.1",
-        "@cheatron/native": "^1.2.9",
+        "@cheatron/native": "^1.2.13",
       },
       "devDependencies": {
         "@eslint/js": "^10.0.1",
@@ -25,7 +25,7 @@
 
     "@cheatron/log": ["@cheatron/log@1.0.1", "", { "dependencies": { "winston": "3.19.0", "winston-daily-rotate-file": "^5.0.0" } }, "sha512-vhOpXGhWXv5c3IgUjOaGy2jcqJU95ZIroRrIgiz7/e4/u8ce/0uj8ttxUkrXRqwpkKWk/zcNg0dbpKrv3/4xww=="],
 
-    "@cheatron/native": ["@cheatron/native@1.2.12", "", { "dependencies": { "@cheatron/keystone": "^1.0.1", "@cheatron/log": "^1.0.1", "@cheatron/native-bindings": "^1.0.8" } }, "sha512-xXuD3vo22bPv/AOZSlAn5ezW3VKwVm06+0MXBvidwY6mz7aISxvxPNsWK3eSQkAvN2iDJ1XYzc3rvbV0RJuDug=="],
+    "@cheatron/native": ["@cheatron/native@1.2.13", "", { "dependencies": { "@cheatron/keystone": "^1.0.1", "@cheatron/log": "^1.0.1", "@cheatron/native-bindings": "^1.0.8" } }, "sha512-ZjybDzzRrE5zwE8c0tKsdqEyPkfWWqmiH5HCpcS+CDbnl0XCWhD0R3R/XruoqCsjPiDzMfptBNxMKPPRk2W+LQ=="],
 
     "@cheatron/native-bindings": ["@cheatron/native-bindings@1.0.8", "", { "dependencies": { "@cheatron/win32-ext": "^1.0.4" } }, "sha512-5qVjJln45qdxh8FQWpDMoXscfG3cF1ZOX8rYYEQtsdyLgKJ6GcdnnhUxNAZz3EK8nNPFDDLLZmgX1jAGxjNZ8w=="],
 
