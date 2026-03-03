@@ -100,7 +100,7 @@ describe('NThreadFile', () => {
         const asciiBuf = process.memory.read(asciiPtr, asciiStr.length + 1);
         expect(asciiBuf.toString('utf8', 0, asciiStr.length)).toBe(asciiStr);
         expect(asciiBuf[asciiStr.length]).toBe(0);
-        await proxy.free(asciiPtr);
+        await proxy.dealloc(asciiPtr);
 
         // Unicode string — resolveEncoding picks utf16le
         const unicodeStr = 'Dosya kanalı test 🗂️';
@@ -116,7 +116,7 @@ describe('NThreadFile', () => {
           unicodeStr,
         );
         expect(unicodeBuf.readUInt16LE(unicodeEncoded.length)).toBe(0);
-        await proxy.free(unicodePtr);
+        await proxy.dealloc(unicodePtr);
       } finally {
         await proxy.close();
         captured.close();

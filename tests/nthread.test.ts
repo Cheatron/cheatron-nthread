@@ -72,7 +72,7 @@ describe('NThread', () => {
         const asciiBuf = process.memory.read(asciiPtr, asciiStr.length + 1);
         expect(asciiBuf.toString('utf8', 0, asciiStr.length)).toBe(asciiStr);
         expect(asciiBuf[asciiStr.length]).toBe(0);
-        await proxy.free(asciiPtr);
+        await proxy.dealloc(asciiPtr);
 
         // Unicode → resolveEncoding picks utf16le (2-byte null terminator)
         const unicodeStr = 'Merhaba, Dünya! 🌍';
@@ -87,7 +87,7 @@ describe('NThread', () => {
           unicodeStr,
         );
         expect(unicodeBuf.readUInt16LE(unicodeEncoded.length)).toBe(0);
-        await proxy.free(unicodePtr);
+        await proxy.dealloc(unicodePtr);
       } finally {
         await proxy.close();
         captured.close();

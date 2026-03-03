@@ -202,7 +202,7 @@ export class NThread {
       proxy.setAllocer((_proxy, size, opts) =>
         this.threadAlloc(_proxy, size, opts),
       );
-      proxy.setFreer((_proxy, ptr) => this.threadFree(_proxy, ptr));
+      proxy.setDeallocer((_proxy, ptr) => this.threadDealloc(_proxy, ptr));
 
       if (
         !(await this.checkModuleLoaded(
@@ -320,7 +320,7 @@ export class NThread {
    * Default: `msvcrt!free`.
    * Subclasses can override to return the block to a managed heap instead.
    */
-  protected async threadFree(
+  protected async threadDealloc(
     proxy: ProxyThread,
     ptr: Native.NativePointer,
   ): Promise<void> {
@@ -418,8 +418,8 @@ export class NThread {
         : (mode as Native.NativePointer).address;
       return await proxy.fopen(pathArg, modeArg);
     } finally {
-      if (pathPtr) await proxy.free(pathPtr);
-      if (modePtr) await proxy.free(modePtr);
+      if (pathPtr) await proxy.dealloc(pathPtr);
+      if (modePtr) await proxy.dealloc(modePtr);
     }
   }
 
@@ -461,7 +461,7 @@ export class NThread {
       );
       return Number(result.address);
     } finally {
-      await proxy.free(ptr);
+      await proxy.dealloc(ptr);
     }
   }
 
@@ -503,7 +503,7 @@ export class NThread {
       const bytesRead = Number(result.address);
       return await proxy.read(ptr.withSize(bytesRead));
     } finally {
-      await proxy.free(ptr);
+      await proxy.dealloc(ptr);
     }
   }
 

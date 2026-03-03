@@ -121,7 +121,7 @@ export class NThreadHeap extends NThread {
     return ptr;
   }
 
-  protected override async threadFree(
+  protected override async threadDealloc(
     proxy: ProxyThread,
     ptr: Native.NativePointer,
   ): Promise<void> {
@@ -131,7 +131,7 @@ export class NThreadHeap extends NThread {
 
     // Unknown or super-backed → delegate to NThread base (crt.free)
     if (!entry || entry === 'super') {
-      return super.threadFree(proxy, ptr);
+      return super.threadDealloc(proxy, ptr);
     }
 
     entry.heap.free(entry.alloc);

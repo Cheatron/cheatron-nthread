@@ -1,5 +1,6 @@
 import * as Native from '@cheatron/native';
 import { crt } from '../crt.js';
+import { kernel32 } from '../kernel32.js';
 import type { Arg } from '../nthread.js';
 import type { AllocOptions } from '../memory/alloc-options.js';
 
@@ -29,7 +30,7 @@ export type AllocFn = (
   size: number,
   opts?: AllocOptions,
 ) => Promise<Native.NativeMemory>;
-export type FreeFn = (
+export type DeallocFn = (
   proxy: ProxyThread,
   ptr: Native.NativePointer,
 ) => Promise<void>;
@@ -80,14 +81,59 @@ export class ProxyThread {
     offset: Arg,
     origin: Arg,
   ) => Promise<Native.NativePointer>;
-  // Note: `free` is a first-class delegate method below — not a CRT auto-binding.
+  /** `msvcrt!free(ptr)` */
+  declare free: (ptr: Arg) => Promise<Native.NativePointer>;
+
+  // --- kernel32.dll bindings ---
+  /** `kernel32!LoadLibraryA(lpLibFileName)` */
+  declare LoadLibraryA: (lpLibFileName: Arg) => Promise<Native.NativePointer>;
+  /** `kernel32!LoadLibraryW(lpLibFileName)` */
+  declare LoadLibraryW: (lpLibFileName: Arg) => Promise<Native.NativePointer>;
+  /** `kernel32!ReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesRead)` */
+  declare ReadProcessMemory: (
+    hProcess: Arg,
+    lpBaseAddress: Arg,
+    lpBuffer: Arg,
+    nSize: Arg,
+    lpNumberOfBytesRead: Arg,
+  ) => Promise<Native.NativePointer>;
+  /** `kernel32!WriteProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesWritten)` */
+  declare WriteProcessMemory: (
+    hProcess: Arg,
+    lpBaseAddress: Arg,
+    lpBuffer: Arg,
+    nSize: Arg,
+    lpNumberOfBytesWritten: Arg,
+  ) => Promise<Native.NativePointer>;
+  /** `kernel32!GetCurrentProcess()` */
+  declare GetCurrentProcess: () => Promise<Native.NativePointer>;
+  /** `kernel32!GetModuleHandleA(lpModuleName)` */
+  declare GetModuleHandleA: (
+    lpModuleName: Arg,
+  ) => Promise<Native.NativePointer>;
+  /** `kernel32!GetModuleHandleW(lpModuleName)` */
+  declare GetModuleHandleW: (
+    lpModuleName: Arg,
+  ) => Promise<Native.NativePointer>;
+  /** `kernel32!GetModuleHandleExA(dwFlags, lpModuleName, phModule)` */
+  declare GetModuleHandleExA: (
+    dwFlags: Arg,
+    lpModuleName: Arg,
+    phModule: Arg,
+  ) => Promise<Native.NativePointer>;
+  /** `kernel32!GetModuleHandleExW(dwFlags, lpModuleName, phModule)` */
+  declare GetModuleHandleExW: (
+    dwFlags: Arg,
+    lpModuleName: Arg,
+    phModule: Arg,
+  ) => Promise<Native.NativePointer>;
 
   private _read: ReadMemoryFn;
   private _write: WriteMemoryFn;
   private _call: CallFn;
   private _close: CloseFn;
   private _alloc: AllocFn;
-  private _free: FreeFn;
+  private _dealloc: DeallocFn;
 
   constructor(close: CloseFn, process?: Native.Process) {
     this._close = close;
@@ -150,14 +196,19 @@ export class ProxyThread {
       }
     };
 
-    // Default free: delegates to msvcrt!free via the call chain
-    this._free = async (_proxy, ptr) => {
+    // Default dealloc: delegates to msvcrt!free via the call chain
+    this._dealloc = async (_proxy, ptr) => {
       await this.call(crt.free, ptr.address);
     };
 
-    // Auto-bind all CRT functions except 'free' (free is a first-class delegate method)
+    // Auto-bind all CRT functions
     for (const [name, address] of Object.entries(crt)) {
-      if (name !== 'free') this.bind(name, address);
+      this.bind(name, address);
+    }
+
+    // Auto-bind all kernel32 functions
+    for (const [name, address] of Object.entries(kernel32)) {
+      this.bind(name, address);
     }
   }
 
@@ -198,9 +249,9 @@ export class ProxyThread {
     this._alloc = fn;
   }
 
-  /** Sets the free strategy */
-  setFreer(fn: FreeFn): void {
-    this._free = fn;
+  /** Sets the dealloc strategy */
+  setDeallocer(fn: DeallocFn): void {
+    this._dealloc = fn;
   }
 
   /** Reads memory from the remote process. When `address` is a `NativeMemory`, `size` defaults to `address.size`. */
@@ -259,8 +310,10 @@ export class ProxyThread {
 
   /**
    * Frees a previously allocated remote pointer.
+   * Routes through the dealloc delegate — subclasses (e.g. NThreadHeap)
+   * can override to return the block to a managed heap instead of calling CRT free.
    */
-  free(ptr: Native.NativePointer): Promise<void> {
-    return this._free(this, ptr);
+  dealloc(ptr: Native.NativePointer): Promise<void> {
+    return this._dealloc(this, ptr);
   }
 }

@@ -80,7 +80,7 @@ Lightweight orchestrator. Does **not** extend `Native.Thread`. Holds resolved ga
 **Overridable hooks** (protected, called by the proxy delegates):
 - `threadClose(proxy, captured, suicide?)` — default: terminate (if suicide) then `captured.close()`
 - `threadAlloc(proxy, size, opts?)` — default: `malloc`/`calloc`/`malloc+memset`; `opts.address` → CRT `realloc`
-- `threadFree(proxy, ptr)` — default: call `crt.free`
+- `threadDealloc(proxy, ptr)` — default: call `crt.free`
 
 ### `CapturedThread` (`thread/captured-thread.ts`) — Thread State
 
@@ -106,9 +106,9 @@ High-level interface for interacting with a captured thread. Does **not** hold a
 
 **Delegate pattern**: Private function fields with setter methods. Public methods auto-pass `this` as the first argument.
 
-**Private fields**: `_read`, `_write`, `_call`, `_close`, `_alloc`, `_free`
+**Private fields**: `_read`, `_write`, `_call`, `_close`, `_alloc`, `_dealloc`
 
-**Setters**: `setReader`, `setWriter`, `setCaller`, `setCloser`, `setAllocer`, `setFreer`
+**Setters**: `setReader`, `setWriter`, `setCaller`, `setCloser`, `setAllocer`, `setDeallocer`
 
 **Function signatures** (all receive `proxy: ProxyThread` as first arg):
 ```typescript
@@ -117,10 +117,10 @@ type WriteMemoryFn = (proxy, address, data, size?) => Promise<number>
 type CallFn        = (proxy, address, ...args) => Promise<NativePointer>
 type CloseFn       = (proxy, suicide?) => Promise<void>
 type AllocFn       = (proxy, size, opts?) => Promise<NativePointer>
-type FreeFn        = (proxy, ptr) => Promise<void>
+type DeallocFn     = (proxy, ptr) => Promise<void>
 ```
 
-**Public methods**: `read`, `write`, `call`, `close(suicide?)`, `alloc(size, opts?)`, `free(ptr)`, `allocString(str, encoding?, opts?)`
+**Public methods**: `read`, `write`, `call`, `close(suicide?)`, `alloc(size, opts?)`, `dealloc(ptr)`, `allocString(str, encoding?, opts?)`
 
 **`allocString(str, encoding?, opts?)`**: Encodes the string (default `utf16le`), appends a null terminator (2 bytes for `utf16le`/`ucs2`, 1 byte otherwise), calls `alloc()` then `write()`. Returns the remote pointer.
 
@@ -131,9 +131,9 @@ type FreeFn        = (proxy, ptr) => Promise<void>
 - `setCaller` → delegates to `nthread.threadCall(captured, ...)`
 - `setWriter` → routes to `writeMemoryWithPointer` (NativePointer) or `writeMemory` (Buffer)
 - `setAllocer` → `nthread.threadAlloc(...)`
-- `setFreer` → `nthread.threadFree(...)`
+- `setDeallocer` → `nthread.threadDealloc(...)`
 
-**CRT auto-binding**: All `crt` entries except `free` are bound as methods on the proxy instance (e.g. `proxy.malloc(size)`). `free` is a first-class delegate method.
+**CRT auto-binding**: All `crt` entries (including `free`) are bound as methods on the proxy instance (e.g. `proxy.malloc(size)`, `proxy.free(ptr)`). The delegate method for managed deallocation is `proxy.dealloc(ptr)`.
 
 ### `NThreadHeap` (`nthread-heap.ts`) — Heap Subclass
 

@@ -89,7 +89,7 @@ const [proxy] = await nt.inject(tid);
 // alloc/free go through the local heap — fewer CRT calls
 const ptr = await proxy.alloc(256, { fill: 0 });
 await proxy.write(ptr, myData);
-await proxy.free(ptr);
+await proxy.dealloc(ptr);
 
 // Allocate and write a null-terminated string in one step
 const strPtr = await proxy.allocString('Hello, target!');
@@ -177,7 +177,7 @@ new NThread(processId?, sleepAddress?, pushretAddress?, regKey?)
 Overridable hooks (for subclasses):
 - `threadClose(proxy, captured, suicide?)` — called by `proxy.close()`
 - `threadAlloc(proxy, size, opts?)` — called by `proxy.alloc()`
-- `threadFree(proxy, ptr)` — called by `proxy.free()`
+- `threadDealloc(proxy, ptr)` — called by `proxy.dealloc()`
 
 ### `NThreadHeap`
 
@@ -213,13 +213,13 @@ High-level interface returned by `inject()`. Each operation is a replaceable del
 | `write(address, data, size?)` | Write memory to the target |
 | `call(address, ...args)` | Call a function (up to 4 args: RCX, RDX, R8, R9) |
 | `alloc(size, opts?)` | Allocate memory (`AllocOptions`: `fill`, `readonly`, `address`) |
-| `free(ptr)` | Free memory |
+| `dealloc(ptr)` | Deallocate memory (routes through delegate; subclasses may use managed heap) |
 | `allocString(str, encoding?, opts?)` | Alloc + write null-terminated string (default `utf16le`) |
 | `close(suicide?)` | Release thread, or terminate with exit code |
 
-**Delegate setters**: `setReader`, `setWriter`, `setCaller`, `setCloser`, `setAllocer`, `setFreer` — replace any operation with a custom function.
+**Delegate setters**: `setReader`, `setWriter`, `setCaller`, `setCloser`, `setAllocer`, `setDeallocer` — replace any operation with a custom function.
 
-**CRT auto-binding**: All resolved `msvcrt` functions are bound as methods on the proxy (e.g. `proxy.malloc(size)`, `proxy.fopen(path, mode)`).
+**CRT auto-binding**: All resolved `msvcrt` functions (including `free`) are bound as methods on the proxy (e.g. `proxy.malloc(size)`, `proxy.free(ptr)`, `proxy.fopen(path, mode)`).
 
 ### `CapturedThread`
 
