@@ -1,6 +1,6 @@
 {
   "name": "@cheatron/nthread",
-  "version": "1.0.4-",
+  "version": "1.0.5",
   "description": "Non-invasive x64 Windows thread hijacking library — seize control of existing threads without shellcode, remote allocation, or CreateRemoteThread.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
