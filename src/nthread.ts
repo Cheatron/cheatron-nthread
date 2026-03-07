@@ -123,9 +123,11 @@ export class NThread {
     thread: Native.Thread | number | CapturedThread,
   ): Promise<[ProxyThread, CapturedThread]> {
     // If an already-captured thread is provided, skip the hijack sequence
-    // and go straight to proxy setup.
+    // and go straight to proxy setup. No try-catch here — the caller owns the
+    // CapturedThread and is responsible for cleanup on failure.
     if (thread instanceof CapturedThread) {
       const result = await this.setupProxy(thread);
+      await this.ensureCrtLoaded(result[0], thread);
       nthreadLog.info(`Proxy configured for captured thread ${thread.tid}`);
       return result;
     }

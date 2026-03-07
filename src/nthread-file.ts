@@ -78,51 +78,45 @@ export class NThreadFile extends NThreadHeap {
   }
 
   // ---------------------------------------------------------------------------
-  // inject override
+  // setupProxy override
   // ---------------------------------------------------------------------------
 
-  override async inject(
-    thread: Native.Thread | number | CapturedThread,
+  protected override async setupProxy(
+    captured: CapturedThread,
   ): Promise<[ProxyThread, CapturedThread]> {
-    const [proxy, captured] = await super.inject(thread);
+    const [proxy, cap] = await super.setupProxy(captured);
 
-    try {
-      // Generate a unique temp path
-      const id = randomBytes(8).toString('hex');
-      const filePath = join(tmpdir(), `nt_${id}`);
+    // Generate a unique temp path
+    const id = randomBytes(8).toString('hex');
+    const filePath = join(tmpdir(), `nt_${id}`);
 
-      // Open the file in the target with read+write mode (kept open for the
-      // proxy's lifetime); fileOpen handles remote string alloc/free internally.
-      const stream = await this.fileOpen(proxy, filePath, 'w+b');
-      if (stream.address === 0n) {
-        throw new FileError(`fopen("${filePath}", "w+b") returned NULL`);
-      }
-
-      const state: FileChannelState = { filePath, stream };
-
-      // Replace writer: file-based attacker→target channel
-      proxy.setWriter((_proxy, address, data, size) =>
-        this.fileChannelWrite(_proxy, state, address, data, size),
-      );
-
-      // Replace reader: file-based target→attacker channel
-      proxy.setReader((_proxy, address, size) =>
-        this.fileChannelRead(_proxy, state, address, size),
-      );
-
-      // Replace closer: clean up file channel, then delegate to base
-      proxy.setCloser((_proxy, suicide?) =>
-        this.fileChannelClose(_proxy, state, captured, suicide),
-      );
-
-      fileLog.info(`File channel established: ${filePath}`);
-
-      return [proxy, captured];
-    } catch (err) {
-      // If file channel setup fails, clean up the base injection
-      await proxy.close();
-      throw err;
+    // Open the file in the target with read+write mode (kept open for the
+    // proxy's lifetime); fileOpen handles remote string alloc/free internally.
+    const stream = await this.fileOpen(proxy, filePath, 'w+b');
+    if (stream.address === 0n) {
+      throw new FileError(`fopen("${filePath}", "w+b") returned NULL`);
     }
+
+    const state: FileChannelState = { filePath, stream };
+
+    // Replace writer: file-based attacker→target channel
+    proxy.setWriter((_proxy, address, data, size) =>
+      this.fileChannelWrite(_proxy, state, address, data, size),
+    );
+
+    // Replace reader: file-based target→attacker channel
+    proxy.setReader((_proxy, address, size) =>
+      this.fileChannelRead(_proxy, state, address, size),
+    );
+
+    // Replace closer: clean up file channel, then delegate to base
+    proxy.setCloser((_proxy, suicide?) =>
+      this.fileChannelClose(_proxy, state, cap, suicide),
+    );
+
+    fileLog.info(`File channel established: ${filePath}`);
+
+    return [proxy, cap];
   }
 
   // ---------------------------------------------------------------------------
