@@ -37,6 +37,14 @@ export class MsvcrtNotLoadedError extends InjectError {
   }
 }
 
+export class ThreadReadNotImplementedError extends NThreadError {
+  constructor() {
+    super(
+      'threadRead is not implemented; use fileRead or writeMemory with a local buffer instead',
+    );
+  }
+}
+
 // ── Call errors ───────────────────────────────────────────────────────────────
 
 export class CallError extends NThreadError {
@@ -101,6 +109,16 @@ export class CallThreadDiedError extends CallError {
   }
 }
 
+// ── Read errors ──────────────────────────────────────────────────────────────
+
+export class ReadError extends NThreadError {}
+
+export class ReadSizeRequiredError extends ReadError {
+  constructor() {
+    super('read: size is required when address is not a NativeMemory');
+  }
+}
+
 // ── Write errors ─────────────────────────────────────────────────────────────────
 
 export class WriteError extends NThreadError {}
@@ -111,9 +129,24 @@ export class WriteSizeRequiredError extends WriteError {
   }
 }
 
+export class WriteFailedError extends WriteError {
+  constructor() {
+    super('Failed to write memory');
+  }
+}
+
 // ── Alloc errors ─────────────────────────────────────────────────────────────
 
 export class AllocError extends NThreadError {}
+
+export class CallocNullError extends AllocError {
+  public readonly size: number;
+
+  constructor(size: number) {
+    super(`calloc(1, ${size}) returned NULL`);
+    this.size = size;
+  }
+}
 
 export class ReallocNullError extends AllocError {
   public readonly address: bigint;
@@ -123,6 +156,80 @@ export class ReallocNullError extends AllocError {
     super(`realloc(0x${address.toString(16)}, ${size}) returned NULL`);
     this.address = address;
     this.size = size;
+  }
+}
+
+// ── Proxy errors ─────────────────────────────────────────────────────────────
+
+export class ProxyError extends NThreadError {}
+
+export class ProxyReadNotConfiguredError extends ProxyError {
+  constructor() {
+    super('read not configured and no Process provided');
+  }
+}
+
+export class ProxyWriteNotConfiguredError extends ProxyError {
+  constructor() {
+    super('write not configured and no Process provided');
+  }
+}
+
+export class ProxyCallNotConfiguredError extends ProxyError {
+  constructor() {
+    super('call not configured');
+  }
+}
+
+// ── Heap errors ──────────────────────────────────────────────────────────────
+
+export class HeapError extends NThreadError {}
+
+export class HeapInvalidSizeError extends HeapError {
+  public readonly roSize: number;
+  public readonly rwSize: number;
+
+  constructor(roSize: number, rwSize: number) {
+    super(`Invalid heap sizes: roSize=${roSize}, rwSize=${rwSize}`);
+    this.roSize = roSize;
+    this.rwSize = rwSize;
+  }
+}
+
+export class HeapAllocSizeError extends HeapError {
+  public readonly size: number;
+
+  constructor(size: number) {
+    super(`Invalid alloc size: ${size}`);
+    this.size = size;
+  }
+}
+
+export class HeapZoneExhaustedError extends HeapError {
+  public readonly zone: 'readonly' | 'readwrite';
+  public readonly requested: number;
+  public readonly available: number;
+
+  constructor(
+    zone: 'readonly' | 'readwrite',
+    requested: number,
+    available: number,
+  ) {
+    super(
+      `${zone === 'readonly' ? 'Readonly' : 'ReadWrite'} zone exhausted: requested ${requested}, available ${available}`,
+    );
+    this.zone = zone;
+    this.requested = requested;
+    this.available = available;
+  }
+}
+
+export class HeapFreeInvalidError extends HeapError {
+  public readonly address: bigint;
+
+  constructor(address: bigint) {
+    super(`Address 0x${address.toString(16)} does not belong to this heap`);
+    this.address = address;
   }
 }
 

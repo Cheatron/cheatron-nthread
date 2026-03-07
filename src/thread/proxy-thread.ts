@@ -3,6 +3,15 @@ import { crt } from '../crt.js';
 import { kernel32 } from '../kernel32.js';
 import type { Arg } from '../nthread.js';
 import type { AllocOptions } from '../memory/alloc-options.js';
+import {
+  ProxyReadNotConfiguredError,
+  ProxyWriteNotConfiguredError,
+  ProxyCallNotConfiguredError,
+  ReadSizeRequiredError,
+  WriteFailedError,
+  WriteSizeRequiredError,
+  ReallocNullError,
+} from '../errors.js';
 
 /**
  * Type signatures for proxy operations.
@@ -138,37 +147,31 @@ export class ProxyThread {
   constructor(close: CloseFn, process?: Native.Process) {
     this._close = close;
     this._read = async (_proxy, address, size) => {
-      if (!process)
-        throw new Error('read not configured and no Process provided.');
+      if (!process) throw new ProxyReadNotConfiguredError();
       return process.memory.read(address, size);
     };
 
     this._write = async (_proxy, address, data, size) => {
-      if (!process)
-        throw new Error('write not configured and no Process provided.');
+      if (!process) throw new ProxyWriteNotConfiguredError();
 
       if (data instanceof Native.NativePointer) {
         if (size) {
           const written = process.memory.writeWithPointer(address, data, size);
-          if (written != size) {
-            throw new Error('Failed to write memory.');
-          }
+          if (written != size) throw new WriteFailedError();
           return written;
         } else {
-          throw new Error('Size must be specified when writing a pointer.');
+          throw new WriteSizeRequiredError();
         }
       } else {
         const writeSize = size ?? data.length;
         const written = process.memory.write(address, data, writeSize);
-        if (written != writeSize) {
-          throw new Error('Failed to write memory.');
-        }
+        if (written != writeSize) throw new WriteFailedError();
         return written;
       }
     };
 
     this._call = async (_proxy, _address, ..._args) => {
-      throw new Error('call not configured.');
+      throw new ProxyCallNotConfiguredError();
     };
 
     // Default alloc: malloc / calloc / malloc+memset depending on opts.fill
@@ -177,22 +180,20 @@ export class ProxyThread {
         // Basic realloc via CRT
         const ptr = await this.realloc(opts.address.address, BigInt(size));
         if (ptr.address === 0n)
-          throw new Error(
-            `realloc(0x${opts.address.address.toString(16)}, ${size}) returned NULL`,
-          );
-        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+          throw new ReallocNullError(opts.address.address, size);
+        return new Native.NativeMemory(ptr.address, size);
       }
       const fill = opts?.fill;
       if (fill === undefined) {
         const ptr = await this.malloc(BigInt(size));
-        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+        return new Native.NativeMemory(ptr.address, size);
       } else if (fill === 0) {
         const ptr = await this.calloc(1n, BigInt(size));
-        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+        return new Native.NativeMemory(ptr.address, size);
       } else {
         const ptr = await this.malloc(BigInt(size));
         await this.memset(ptr.address, BigInt(fill & 0xff), BigInt(size));
-        return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+        return new Native.NativeMemory(ptr.address, size);
       }
     };
 
@@ -261,10 +262,7 @@ export class ProxyThread {
     const sz =
       size ??
       (address instanceof Native.NativeMemory ? address.size : undefined);
-    if (sz === undefined)
-      throw new Error(
-        'read: size is required when address is not a NativeMemory',
-      );
+    if (sz === undefined) throw new ReadSizeRequiredError();
     return this._read(this, address, sz);
   }
 

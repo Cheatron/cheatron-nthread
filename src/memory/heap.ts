@@ -6,6 +6,13 @@ import {
   type ReadOnlyMemory,
 } from './romem.js';
 import { crt } from '../crt.js';
+import {
+  CallocNullError,
+  HeapInvalidSizeError,
+  HeapAllocSizeError,
+  HeapZoneExhaustedError,
+  HeapFreeInvalidError,
+} from '../errors.js';
 
 /** Default total heap size (bytes) */
 export const DEFAULT_HEAP_SIZE = 16384;
@@ -109,14 +116,12 @@ export class Heap {
     const rwSize = totalSize - actualRoSize;
 
     if (actualRoSize < 0 || rwSize < 0) {
-      throw new Error(
-        `Invalid heap sizes: roSize=${actualRoSize}, rwSize=${rwSize}`,
-      );
+      throw new HeapInvalidSizeError(actualRoSize, rwSize);
     }
 
     const base = await proxy.call(crt.calloc, 1, totalSize);
     if (base.address === 0n) {
-      throw new Error(`calloc(1, ${totalSize}) returned NULL`);
+      throw new CallocNullError(totalSize);
     }
 
     // Register the readonly zone as romem for snapshot-based write optimization
@@ -247,7 +252,7 @@ export class Heap {
    * @throws If the readonly zone doesn't have enough space.
    */
   allocReadonly(size: number): HeapAlloc {
-    if (size <= 0) throw new Error(`Invalid alloc size: ${size}`);
+    if (size <= 0) throw new HeapAllocSizeError(size);
 
     // Try free list first
     const freeIdx = Heap.findFreeBlock(this.roFreeList, size);
@@ -262,9 +267,7 @@ export class Heap {
 
     // Bump allocate
     if (this.roOffset + size > this.roSize) {
-      throw new Error(
-        `Readonly zone exhausted: requested ${size}, available ${this.roAvailable}`,
-      );
+      throw new HeapZoneExhaustedError('readonly', size, this.roAvailable);
     }
 
     const remote = new Native.NativeMemory(
@@ -286,7 +289,7 @@ export class Heap {
    * @throws If the readwrite zone doesn't have enough space.
    */
   alloc(size: number): HeapAlloc {
-    if (size <= 0) throw new Error(`Invalid alloc size: ${size}`);
+    if (size <= 0) throw new HeapAllocSizeError(size);
 
     // Try free list first
     const freeIdx = Heap.findFreeBlock(this.rwFreeList, size);
@@ -301,9 +304,7 @@ export class Heap {
 
     // Bump allocate
     if (this.rwOffset + size > this.rwSize) {
-      throw new Error(
-        `ReadWrite zone exhausted: requested ${size}, available ${this.rwAvailable}`,
-      );
+      throw new HeapZoneExhaustedError('readwrite', size, this.rwAvailable);
     }
 
     const remote = new Native.NativeMemory(
@@ -339,9 +340,7 @@ export class Heap {
       const offset = Number(addr - roEnd);
       Heap.insertAndCoalesce(this.rwFreeList, offset, alloc.size);
     } else {
-      throw new Error(
-        `Address 0x${addr.toString(16)} does not belong to this heap`,
-      );
+      throw new HeapFreeInvalidError(addr);
     }
   }
 

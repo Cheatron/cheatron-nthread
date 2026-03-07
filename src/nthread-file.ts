@@ -82,7 +82,7 @@ export class NThreadFile extends NThreadHeap {
   // ---------------------------------------------------------------------------
 
   override async inject(
-    thread: Native.Thread | number,
+    thread: Native.Thread | number | CapturedThread,
   ): Promise<[ProxyThread, CapturedThread]> {
     const [proxy, captured] = await super.inject(thread);
 

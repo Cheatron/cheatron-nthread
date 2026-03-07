@@ -1,6 +1,7 @@
 import * as Native from '@cheatron/native';
 import type { ProxyThread } from '../thread/proxy-thread.js';
 import { crt } from '../crt.js';
+import { CallocNullError } from '../errors.js';
 
 /**
  * A read-only memory region allocated in the target process.
@@ -32,10 +33,10 @@ export async function createReadOnlyMemory(
 ): Promise<ReadOnlyMemory> {
   const ptr = await proxy.call(crt.calloc, 1, size);
   if (ptr.address === 0n) {
-    throw new Error(`calloc(1, ${size}) returned NULL`);
+    throw new CallocNullError(size);
   }
 
-  const remote = Native.NativeMemory.createFromPointer(ptr, undefined, size);
+  const remote = new Native.NativeMemory(ptr.address, size);
   const local = Buffer.alloc(size); // zero-filled — matches calloc
   const romem: ReadOnlyMemory = { remote, local };
   regions.push(romem);

@@ -22,6 +22,7 @@ import {
   CallThreadDiedError,
   WriteSizeRequiredError,
   ReallocNullError,
+  ThreadReadNotImplementedError,
 } from './errors.js';
 import {
   findOverlappingRegion,
@@ -119,8 +120,16 @@ export class NThread {
    * @param thread Thread object or Thread ID to hijack.
    */
   async inject(
-    thread: Native.Thread | number,
+    thread: Native.Thread | number | CapturedThread,
   ): Promise<[ProxyThread, CapturedThread]> {
+    // If an already-captured thread is provided, skip the hijack sequence
+    // and go straight to proxy setup.
+    if (thread instanceof CapturedThread) {
+      const result = await this.setupProxy(thread);
+      nthreadLog.info(`Proxy configured for captured thread ${thread.tid}`);
+      return result;
+    }
+
     // Resolve handle + tid. Keep the source object alive in scope so the GC
     // happens only on success.
     let handle: Native.HANDLE;
@@ -190,36 +199,61 @@ export class NThread {
       captured.latestContext.ContextFlags =
         Native.ContextFlags.INTEGER | Native.ContextFlags.CONTROL;
 
-      const proxy = new ProxyThread((_proxy, suicide) =>
-        this.threadClose(_proxy, captured, suicide),
-      );
-      proxy.setCaller((_proxy, address, ...proxyArgs) =>
-        this.threadCall(_proxy, captured, address, [...proxyArgs]),
-      );
-      proxy.setWriter((_proxy, address, data, size) =>
-        this.threadWrite(_proxy, address, data, size),
-      );
-      proxy.setAllocer((_proxy, size, opts) =>
-        this.threadAlloc(_proxy, size, opts),
-      );
-      proxy.setDeallocer((_proxy, ptr) => this.threadDealloc(_proxy, ptr));
-
-      if (
-        !(await this.checkModuleLoaded(
-          proxy,
-          captured,
-          Native.Module.crt.base.address,
-        ))
-      ) {
-        throw new MsvcrtNotLoadedError();
-      }
+      const result = await this.setupProxy(captured);
+      await this.ensureCrtLoaded(result[0], captured);
 
       nthreadLog.info(`Successfully injected into thread ${captured.tid}`);
-      return [proxy, captured];
+      return result;
     } catch (err) {
       captured.release();
       throw err;
     }
+  }
+
+  /**
+   * Verifies that msvcrt.dll is loaded in the target process.
+   * @throws {MsvcrtNotLoadedError} if the module is not found.
+   */
+  protected async ensureCrtLoaded(
+    proxy: ProxyThread,
+    captured: CapturedThread,
+  ): Promise<void> {
+    if (
+      !(await this.checkModuleLoaded(
+        proxy,
+        captured,
+        Native.Module.crt.base.address,
+      ))
+    ) {
+      throw new MsvcrtNotLoadedError();
+    }
+  }
+
+  /**
+   * Creates and configures a ProxyThread for the given captured thread.
+   * Wires up all delegates (caller, writer, reader, allocer, deallocer).
+   */
+  protected async setupProxy(
+    captured: CapturedThread,
+  ): Promise<[ProxyThread, CapturedThread]> {
+    const proxy = new ProxyThread((_proxy, suicide) =>
+      this.threadClose(_proxy, captured, suicide),
+    );
+    proxy.setCaller((_proxy, address, ...proxyArgs) =>
+      this.threadCall(_proxy, captured, address, [...proxyArgs]),
+    );
+    proxy.setWriter((_proxy, address, data, size) =>
+      this.threadWrite(_proxy, address, data, size),
+    );
+    proxy.setReader((_proxy, address, size) =>
+      this.threadRead(_proxy, address, size),
+    );
+    proxy.setAllocer((_proxy, size, opts) =>
+      this.threadAlloc(_proxy, size, opts),
+    );
+    proxy.setDeallocer((_proxy, ptr) => this.threadDealloc(_proxy, ptr));
+
+    return [proxy, captured];
   }
 
   /**
@@ -248,6 +282,15 @@ export class NThread {
       [flags, moduleBase, outPtr],
     );
     return result.address !== 0n;
+  }
+
+  /** Reads data from the target process via ReadProcessMemory. */
+  private async threadRead(
+    _proxy: ProxyThread,
+    _address: Native.NativePointer,
+    _size: number,
+  ): Promise<Buffer> {
+    throw new ThreadReadNotImplementedError();
   }
 
   /** Writes data to the target process; dispatches NativePointer vs Buffer. */
@@ -299,19 +342,19 @@ export class NThread {
       const ptr = await proxy.realloc(opts.address.address, BigInt(size));
       if (ptr.address === 0n)
         throw new ReallocNullError(opts.address.address, size);
-      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+      return new Native.NativeMemory(ptr.address, size);
     }
     const fill = opts?.fill;
     if (fill === undefined) {
       const ptr = await proxy.malloc(BigInt(size));
-      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+      return new Native.NativeMemory(ptr.address, size);
     } else if (fill === 0) {
       const ptr = await proxy.calloc(1n, BigInt(size));
-      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+      return new Native.NativeMemory(ptr.address, size);
     } else {
       const ptr = await proxy.malloc(BigInt(size));
       await proxy.memset(ptr.address, BigInt(fill & 0xff), BigInt(size));
-      return Native.NativeMemory.createFromPointer(ptr, undefined, size);
+      return new Native.NativeMemory(ptr.address, size);
     }
   }
 
@@ -567,12 +610,12 @@ export class NThread {
 
     // Safety check: verify thread is actually at the sleep address
     const currentRip = BigInt(thread.getContext().Rip);
-    if (currentRip !== this.sleepAddress.address) {
+    if (currentRip !== thread.sleepAddress.address) {
       thread.resume();
       throw new CallRipMismatchError(
         targetAddr,
         currentRip,
-        this.sleepAddress.address,
+        thread.sleepAddress.address,
       );
     }
 
