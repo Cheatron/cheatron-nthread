@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@cheatron/keystone": "^1.0.1",
-    "@cheatron/native": "^1.3.1"
+    "@cheatron/native": "^1.3.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
