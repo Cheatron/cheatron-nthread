@@ -14,6 +14,8 @@ describe('CRT Initialization', () => {
     expect(crt.fclose).toBeDefined();
     expect(crt.fread).toBeDefined();
     expect(crt.free).toBeDefined();
+    expect(crt.strlen).toBeDefined();
+    expect(crt.wcslen).toBeDefined();
 
     // Basic check that they are addresses
     // In some environments/koffi versions these might be bigints, numbers, or objects (Buffers/Pointers)

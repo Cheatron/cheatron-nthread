@@ -11,7 +11,7 @@ NThread seizes control of a running thread **without allocating remote memory or
 
 ### Hijack flow (in `NThread.inject(thread)`):
 ```
-captured = new CapturedThread(thread, regKey, sleepAddress)
+captured = new CapturedThread(handle, tid, regKey, sleepAddress)
 captured.suspend()
 captured.fetchContext()         → read hardware registers into cache
 captured.setRIP(pushret)        → next instruction to execute after resume
@@ -24,7 +24,10 @@ captured.wait() loop:
   fetchContext() → check Rip == sleepAddress
   → repeat until match
 
-return [new ProxyThread(closeFn), captured]
+result = setupProxy(captured)   → create ProxyThread + wire delegates
+ensureCrtLoaded(proxy, captured) → verify msvcrt.dll is loaded
+
+return [proxy, captured]
 ```
 
 ## 2. Architecture: Four-Class Composition
@@ -61,24 +64,53 @@ tests/
 
 Lightweight orchestrator. Does **not** extend `Native.Thread`. Holds resolved gadget addresses (`sleepAddress`, `pushretAddress`, `regKey`) and an optional `processId` for diagnostics.
 
-**`export type Arg = bigint | number | Native.NativePointer | string`** — defined here, re-exported from `index.ts`. String arguments are auto-resolved to remote pointers via `resolveArgs` (ASCII → utf8, non-ASCII → utf16le).
+**`export type Arg = bigint | number | Native.NativePointer | string`** — defined here, re-exported from `index.ts`. String arguments are auto-resolved to remote pointers via `resolveArgs` (uses `resolveEncoding`: ASCII → utf8, non-ASCII → utf16le).
 
 **Constructor**: `(processId?, sleepAddress?, pushretAddress?, regKey?)` — resolves gadgets from the global registry if not explicitly provided.
 
-**`inject(thread: Native.Thread | number)`**: Creates a `CapturedThread`, performs the hijack sequence, and returns a `[ProxyThread, CapturedThread]` tuple.
+**`inject(thread: Native.Thread | number | CapturedThread)`**: Two paths:
 
-**`threadCall(thread, target, args, timeoutMs)`**: x64 calling convention: maps up to 4 args to `RCX, RDX, R8, R9`, sets `RIP` to target, `RSP` to `thread.callRsp`, resumes, and waits for RIP to return to sleep. Returns `RAX` as `NativePointer`.
+1. **CapturedThread path**: If `thread instanceof CapturedThread`, skips hijack sequence entirely → calls `setupProxy(thread)` + `ensureCrtLoaded()`. No try-catch — the caller owns the CapturedThread and is responsible for cleanup on failure.
 
-**`writeMemory(thread, dest, source)`**: Checks the global romem registry for overlapping regions. If overlap found, splits the write into up to 3 parts (before/overlap/after): the overlap goes through `writeMemorySafeBuffer` (skips unchanged bytes) and `updateSnapshot` updates the local copy.
+2. **Normal path**: Resolves handle + tid from `Thread` object or TID number → creates `CapturedThread(handle, tid, regKey, sleepAddress)` → performs hijack sequence → polls `wait()` → calls `setupProxy()` + `ensureCrtLoaded()` → returns `[ProxyThread, CapturedThread]`. On error, calls `captured.release()` to restore the thread.
 
-**`writeMemoryWithPointer(thread, dest, source, size)`**: Reads from a `NativePointer` source, then writes via decomposed memset. Does **not** check romem.
+**`setupProxy(captured)`** (protected, overridable): Creates a `ProxyThread` and wires all delegates:
+- `_close` → `nthread.threadClose(captured, ...)`
+- `setCaller` → delegates to `nthread.threadCall(captured, ...)`
+- `setWriter` → routes to `threadWrite` (dispatches NativePointer vs Buffer)
+- `setReader` → routes to `threadRead` (throws `ThreadReadNotImplementedError` by default)
+- `setAllocer` → `nthread.threadAlloc(...)`
+- `setDeallocer` → `nthread.threadDealloc(...)`
 
-**`writeMemorySafe(thread, dest, source, lastDest)`**: Routes to optimized variants:
+**`ensureCrtLoaded(proxy, captured)`** (protected): Calls `checkModuleLoaded` with `msvcrt.dll`'s base address. Throws `MsvcrtNotLoadedError` if the module is not found.
+
+**`checkModuleLoaded(proxy, captured, moduleBase)`** (protected): Uses `GetModuleHandleExA` with `FROM_ADDRESS | UNCHANGED_REFCOUNT` to verify a module is loaded in the target process without bumping its reference count.
+
+**`threadCall(proxy, thread, target, args, timeoutMs)`**: x64 calling convention: maps up to 4 args to `RCX, RDX, R8, R9`, sets `RIP` to target, `RSP` to `thread.callRsp`, resumes, and waits for RIP to return to sleep. Returns `RAX` as `NativePointer`.
+
+**`resolveArgs(proxy, args)`** (protected): Converts `Arg[]` to `bigint[]`. `string` args are auto-allocated via `resolveEncoding` (ASCII → utf8, non-ASCII → utf16le), `NativePointer` → `.address`, `number` → `BigInt()`.
+
+**`writeMemory(proxy, dest, source)`**: Checks the global romem registry for overlapping regions. If overlap found, splits the write into up to 3 parts (before/overlap/after): the overlap goes through `writeMemorySafeBuffer` (skips unchanged bytes) and `updateSnapshot` updates the local copy. Non-overlapping parts use decomposed `memset`.
+
+**`writeMemoryWithPointer(proxy, dest, source, size)`**: Reads from a `NativePointer` source via `currentProcess.memory.read()`, then writes via decomposed `memset`. Does **not** check romem.
+
+**`writeMemorySafe(proxy, dest, source, lastDest)`**: Routes to optimized variants:
 - `lastDest: number` → uniform fill — skips bytes matching `fillByte`
 - `lastDest: Buffer` → snapshot diff — skips bytes matching the previous state
 
+**`allocString(proxy, str, opts?)`**: Allocates and writes a null-terminated string. Uses `resolveEncoding` for auto-detection (ASCII → utf8 + 1-byte null, non-ASCII → utf16le + 2-byte null). Returns `NativeMemory`.
+
+**`writeString(proxy, dest, str)`**: Encodes `str` with null terminator and writes to an existing remote address. Auto-detects encoding via `resolveEncoding`. Returns byte count.
+
+**File I/O helpers** (public methods on NThread):
+- `fileOpen(proxy, path, mode)` → `fopen` in target; auto-allocs/frees string args
+- `fileWrite(proxy, stream, data)` → `fwrite` — accepts `Buffer`, `string`, or `NativeMemory`
+- `fileRead(proxy, stream, dest)` → `fread` — `NativeMemory` or byte-count → `Buffer`
+- `fileFlush(proxy, stream)` → `fflush`
+- `fileClose(proxy, stream)` → `fclose`
+
 **Overridable hooks** (protected, called by the proxy delegates):
-- `threadClose(proxy, captured, suicide?)` — default: terminate (if suicide) then `captured.close()`
+- `threadClose(proxy, captured, suicide?)` — default: `terminate(suicide)` then `captured.close()`
 - `threadAlloc(proxy, size, opts?)` — default: `malloc`/`calloc`/`malloc+memset`; `opts.address` → CRT `realloc`
 - `threadDealloc(proxy, ptr)` — default: call `crt.free`
 
@@ -86,11 +118,15 @@ Lightweight orchestrator. Does **not** extend `Native.Thread`. Holds resolved ga
 
 Extends `Native.Thread` from `@cheatron/native`. Owns all low-level thread state.
 
+**Constructor**: `(handle: Native.HANDLE, threadId: number, regKey: GeneralPurposeRegs, sleepAddress: NativePointer)` — takes ownership of the raw handle.
+
 **Context cache pattern**: Two-layer context system:
 - `latestContext`: in-memory cache. `getContext()` / `setContext()` operate on this.
 - Hardware: `fetchContext()` reads from hardware → cache. `applyContext()` writes cache → hardware.
 
 **Fields**: `suspendCount`, `savedContext`, `latestContext`, `callRsp: bigint = 0n`, `sleepAddress`, `regKey`.
+
+**`suspend()`**: Always increments `suspendCount` after a successful call. `SuspendThread` returns the *previous* suspend count (0 when the thread was running) — this is falsy in JS, so the increment is unconditional.
 
 **`release()`**: Restores the thread to its pre-hijack state without closing the handle: `suspend → setContext(savedContext) → applyContext → resume`.
 
@@ -98,7 +134,7 @@ Extends `Native.Thread` from `@cheatron/native`. Owns all low-level thread state
 
 **`wait()` implementation**: Polls `fetchContext()` in a loop, checking `BigInt(rip) === sleepAddress.address`. On `fetchContext()` throw → `super.wait(0)` to detect termination.
 
-**`calcStackBegin(baseRsp)`**: Computes `alignStack(baseRsp + STACK_ADD)` where `STACK_ADD = -8192n`. Parameter is the **current RSP value**.
+**`calcStackBegin(baseRsp)`**: Computes `stackAlign16(baseRsp + STACK_ADD)` where `STACK_ADD = -8192n`. Parameter is the **current RSP value**.
 
 ### `ProxyThread` (`thread/proxy-thread.ts`) — Extensible Interface
 
@@ -116,24 +152,28 @@ type ReadMemoryFn  = (proxy, address, size) => Promise<Buffer>
 type WriteMemoryFn = (proxy, address, data, size?) => Promise<number>
 type CallFn        = (proxy, address, ...args) => Promise<NativePointer>
 type CloseFn       = (proxy, suicide?) => Promise<void>
-type AllocFn       = (proxy, size, opts?) => Promise<NativePointer>
+type AllocFn       = (proxy, size, opts?) => Promise<NativeMemory>
 type DeallocFn     = (proxy, ptr) => Promise<void>
 ```
 
-**Public methods**: `read`, `write`, `call`, `close(suicide?)`, `alloc(size, opts?)`, `dealloc(ptr)`, `allocString(str, encoding?, opts?)`
+**Public methods**: `read`, `write`, `call`, `close(suicide?)`, `alloc(size, opts?)`, `dealloc(ptr)`
 
-**`allocString(str, encoding?, opts?)`**: Encodes the string (default `utf16le`), appends a null terminator (2 bytes for `utf16le`/`ucs2`, 1 byte otherwise), calls `alloc()` then `write()`. Returns the remote pointer.
+**`read()` overloads**: `read(NativeMemory)` uses `.size` automatically; `read(NativePointer, size)` requires explicit size.
 
-**Constructor**: `(close: CloseFn, process?: Native.Process)` — `close` is required. `process` is captured in default `_read`/`_write` closures.
+**Constructor**: `(close: CloseFn, process?: Native.Process)` — `close` is required. `process` is captured in default `_read`/`_write` closures (fallback when no thread-based delegates are set).
 
-**During `inject()`**, NThread configures the proxy:
-- `_close` → `nthread.threadClose(captured, ...)`
-- `setCaller` → delegates to `nthread.threadCall(captured, ...)`
-- `setWriter` → routes to `writeMemoryWithPointer` (NativePointer) or `writeMemory` (Buffer)
-- `setAllocer` → `nthread.threadAlloc(...)`
-- `setDeallocer` → `nthread.threadDealloc(...)`
+**Default delegates** (set in constructor, overridden by `setupProxy`):
+- `_read` → `process.memory.read()` (throws `ProxyReadNotConfiguredError` if no process)
+- `_write` → `process.memory.write()` / `writeWithPointer()` (throws if no process)
+- `_call` → throws `ProxyCallNotConfiguredError`
+- `_alloc` → CRT malloc/calloc/realloc via bound methods
+- `_dealloc` → `this.call(crt.free, ptr)`
 
-**CRT auto-binding**: All `crt` entries (including `free`) are bound as methods on the proxy instance (e.g. `proxy.malloc(size)`, `proxy.free(ptr)`). The delegate method for managed deallocation is `proxy.dealloc(ptr)`.
+**`bind(name, address)`**: Creates a property on the proxy that delegates to `this.call(address, ...args)`.
+
+**CRT auto-binding**: All `crt` entries (including `free`) are bound as methods on the proxy instance (e.g. `proxy.malloc(size)`, `proxy.free(ptr)`, `proxy.fopen(path, mode)`).
+
+**kernel32 auto-binding**: All `kernel32` entries are also bound (e.g. `proxy.LoadLibraryA(name)`, `proxy.GetModuleHandleExA(flags, name, phModule)`).
 
 ### `NThreadHeap` (`nthread-heap.ts`) — Heap Subclass
 
@@ -148,6 +188,8 @@ Subclass of `NThread`. Maintains a `ProxyState` per proxy: `{ heap: Heap | null,
 **`threadAlloc`** override:
 - `opts.address` → `reallocInternal` (heap-aware realloc)
 - Otherwise → `allocFromHeap` (try current heap → grow → fallback to super)
+
+**`threadDealloc`** override: looks up `AllocRecord`; if heap-backed → `heap.free(alloc)`, if `'super'` or unknown → `super.threadDealloc()` (CRT free).
 
 **`reallocInternal`**: detects old zone from address range; preserves zone unless `opts.readonly` is explicitly set; fills `[copyLen..newSize]` with `opts.fill`; fallback uses `{ ...opts, address: undefined }` to avoid CRT realloc on a heap pointer.
 
@@ -179,6 +221,12 @@ Exported functions: `fopen`, `memset`, `malloc`, `calloc`, `fwrite`, `fflush`, `
 
 **Important**: Top-level initialization — depends on `@cheatron/native`'s module graph being fully resolved.
 
+## 4b. Kernel32 Resolver (`kernel32.ts`)
+
+Resolves `kernel32.dll` exports at module load time via `Native.Module.kernel32.getProcAddress(name)`. All values are `NativePointer`.
+
+Exported functions: `LoadLibraryA`, `LoadLibraryW`, `ReadProcessMemory`, `WriteProcessMemory`, `GetCurrentProcess`, `GetModuleHandleA`, `GetModuleHandleW`, `GetModuleHandleExA`, `GetModuleHandleExW`.
+
 ## 5. Memory Write Strategies
 
 ### `memset`-write
@@ -197,12 +245,12 @@ Subclass of `NThreadHeap`. Replaces `ReadProcessMemory`/`WriteProcessMemory` (an
 
 **Per-proxy state** (`FileChannelState`): `filePath` (local temp file path), `stream` (`FILE*` handle kept open in the target).
 
-**`inject()` override**:
-1. Calls `super.inject()` to perform the base hijack + heap setup.
+**`setupProxy()` override**:
+1. Calls `super.setupProxy()` to create the proxy and wire base delegates.
 2. Generates a unique temp file path via `crypto.randomBytes`.
 3. Opens the file in the target with `fopen(path, "w+b")` — the `FILE*` is kept open.
-4. Overrides `proxy.setWriter()` → `fileChannelWrite` and `proxy.setReader()` → `fileChannelRead`.
-5. On failure, calls `proxy.close()` to clean up the base injection.
+4. Overrides `proxy.setWriter()` → `fileChannelWrite`, `proxy.setReader()` → `fileChannelRead`, `proxy.setCloser()` → `fileChannelClose`.
+5. Errors propagate to `inject()`'s catch block which calls `captured.release()`.
 
 **`fileChannelWrite` (attacker → target)**:
 1. Writes data to local temp file (`fs.writeFileSync` — truncates).
@@ -215,7 +263,7 @@ Subclass of `NThreadHeap`. Replaces `ReadProcessMemory`/`WriteProcessMemory` (an
 3. `fflush(stream)` ensures data reaches disk.
 4. Reads the file locally (`fs.readFileSync`).
 
-**`threadClose` override**: Closes the `FILE*` stream via `fclose`, deletes the temp file (best-effort), then delegates to `super.threadClose()` (heap destruction + thread restore).
+**`fileChannelClose`**: Closes the `FILE*` stream via `fclose`, deletes the temp file (best-effort), then delegates to `super.threadClose()` (heap destruction + thread restore).
 
 **Note**: The file channel bypasses the romem snapshot system entirely. Read-only memory regions are not snapshot-tracked when using file-channel writes — the full buffer is transferred every time. Path rotation (reusing new file paths after `max_transfer` bytes) is not yet implemented.
 
@@ -224,7 +272,7 @@ Subclass of `NThreadHeap`. Replaces `ReadProcessMemory`/`WriteProcessMemory` (an
 Bidirectional memory I/O entirely through the filesystem — no `ReadProcessMemory`, no `WriteProcessMemory`.
 
 Architecture:
-- Single temp file opened once with `"w+b"` (read+write) during `inject()`, kept open as `FILE*`.
+- Single temp file opened once with `"w+b"` (read+write) during `setupProxy()`, kept open as `FILE*`.
 - **Write channel** (attacker → target): attacker writes temp file locally → `fseek(0)` + `fread` in target
 - **Read channel** (target → attacker): `fseek(0)` + `fwrite` + `fflush` in target → attacker reads temp file
 - No per-operation `fopen`/`fclose` overhead — only `fseek` resets the position
@@ -255,9 +303,10 @@ Typescript-native write optimization. Tracks `(remote: NativePointer, local: Buf
 
 ## 8. Dependencies
 
-- **`@cheatron/native`**: `NativePointer`, `IPointer`, `Thread`, `Module`, `Pattern`, `Scanner`, `currentProcess`, `ContextFlags`, `MemoryState`, `MemoryProtection`
+- **`@cheatron/native`**: `NativePointer`, `NativeMemory`, `IPointer`, `Thread`, `Module`, `Pattern`, `Scanner`, `currentProcess`, `ContextFlags`, `MemoryState`, `MemoryProtection`, `resolveEncoding`, `stackAlign16`
 - **`@cheatron/keystone`**: `KeystoneX86` for assembling gadget patterns during auto-discovery
 - **`@cheatron/log`**: Shared logger, re-exported from `@cheatron/native`
+- **`@cheatron/win32-ext`**: `GetModuleHandleExFlag` for module detection
 
 ## 9. Development & Testing
 
@@ -271,23 +320,3 @@ Typescript-native write optimization. Tracks `(remote: NativePointer, local: Buf
 - `tests/nthread.test.ts` — inject into `jmp .` thread, verify context, `proxy.write()`, `allocString`, `ExitThread(42)` via `proxy.call()`
 - `tests/nthread-file.test.ts` — file channel inject, write/read through file channel, large buffer, `allocString`, `proxy.close()` cleanup
 - `tests/romem.test.ts` — `createReadOnlyMemory`, skip-write for identical data, snapshot updates, `unregisterReadOnlyMemory`
-
-
-### Hijack flow (in `NThread.inject(thread)`):
-```
-captured = new CapturedThread(thread, regKey, sleepAddress)
-captured.suspend()
-captured.fetchContext()         → read hardware registers into cache
-captured.setRIP(pushret)        → next instruction to execute after resume
-captured.setRSP(calcStackBegin) → safe scratch stack (currentRSP - 8192, 16-aligned)
-captured.setTargetReg(sleep)    → the register that pushret will 'push; ret' to
-captured.applyContext()         → write cache → hardware
-captured.resume()
-
-captured.wait() loop:
-  fetchContext() → check Rip == sleepAddress
-  → repeat until match
-
-return [new ProxyThread(closeFn), captured]
-```
-

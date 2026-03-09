@@ -92,6 +92,10 @@ export class ProxyThread {
   ) => Promise<Native.NativePointer>;
   /** `msvcrt!free(ptr)` */
   declare free: (ptr: Arg) => Promise<Native.NativePointer>;
+  /** `msvcrt!strlen(str)` — returns string length in bytes (narrow) */
+  declare strlen: (str: Arg) => Promise<Native.NativePointer>;
+  /** `msvcrt!wcslen(str)` — returns string length in wide characters */
+  declare wcslen: (str: Arg) => Promise<Native.NativePointer>;
 
   // --- kernel32.dll bindings ---
   /** `kernel32!LoadLibraryA(lpLibFileName)` */

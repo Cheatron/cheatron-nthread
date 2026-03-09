@@ -18,6 +18,8 @@ export interface CRTFunctions {
   fread: Native.NativePointer;
   fseek: Native.NativePointer;
   free: Native.NativePointer;
+  strlen: Native.NativePointer;
+  wcslen: Native.NativePointer;
 }
 
 /**
@@ -46,4 +48,6 @@ export const crt: CRTFunctions = {
   fread: get('fread'),
   fseek: get('fseek'),
   free: get('free'),
+  strlen: get('strlen'),
+  wcslen: get('wcslen'),
 };

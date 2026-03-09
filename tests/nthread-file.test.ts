@@ -1,6 +1,13 @@
 import { expect, test, describe } from 'bun:test';
 import * as Native from '@cheatron/native';
-import { NThread, NThreadFile, CallThreadDiedError } from '../src/index.js';
+import {
+  NThread,
+  NThreadFile,
+  CallThreadDiedError,
+  createReadOnlyMemory,
+  unregisterReadOnlyMemory,
+  findOverlappingRegion,
+} from '../src/index.js';
 import { spawnLoopThread, cleanupThread } from './helpers.js';
 
 describe('NThreadFile', () => {
@@ -221,6 +228,106 @@ describe('NThreadFile', () => {
 
       expect(captured.getExitCode()).toBe(99);
       captured.close();
+    } finally {
+      cleanupThread(spawned);
+    }
+  });
+
+  test('readonly alloc + write/read through file channel', async () => {
+    const spawned = await spawnLoopThread();
+    const process = Native.currentProcess;
+
+    try {
+      const nt = new NThreadFile();
+      const [proxy, captured] = await nt.inject(spawned.tid);
+
+      try {
+        // 1. Allocate a readonly region via the heap (zero-filled)
+        const size = 32;
+        const ptr = await proxy.alloc(size, { readonly: true });
+        expect(ptr.address).not.toBe(0n);
+        expect(ptr.size).toBe(size);
+
+        // Verify zero-initialized via file channel read
+        const zeroBuf = await proxy.read(ptr);
+        expect(zeroBuf.length).toBe(size);
+        expect(zeroBuf.every((b) => b === 0)).toBe(true);
+
+        // 2. Write a pattern through the file channel
+        const pattern = Buffer.alloc(size);
+        pattern.writeUInt32LE(0xdeadbeef, 0);
+        pattern.writeUInt32LE(0xcafebabe, 16);
+        const written = await proxy.write(ptr, pattern);
+        expect(written).toBe(size);
+
+        // 3. Read back through the file channel
+        const readBack = await proxy.read(ptr);
+        expect(readBack.length).toBe(size);
+        expect(readBack.readUInt32LE(0)).toBe(0xdeadbeef);
+        expect(readBack.readUInt32LE(4)).toBe(0);
+        expect(readBack.readUInt32LE(16)).toBe(0xcafebabe);
+        expect(readBack.readUInt32LE(20)).toBe(0);
+
+        // 4. Cross-verify via direct process memory read
+        const directRead = process.memory.read(ptr, size);
+        expect(Buffer.compare(directRead, pattern)).toBe(0);
+
+        // 5. Dealloc the readonly region (should go through heap free, not CRT)
+        await proxy.dealloc(ptr);
+      } finally {
+        await proxy.close();
+        captured.close();
+      }
+    } finally {
+      cleanupThread(spawned);
+    }
+  });
+
+  test('romem with file channel — snapshot not tracked but writes work', async () => {
+    const spawned = await spawnLoopThread();
+    const process = Native.currentProcess;
+
+    try {
+      const nt = new NThreadFile();
+      const [proxy, captured] = await nt.inject(spawned.tid);
+
+      try {
+        // 1. Create a romem region — calloc-backed, registered in the global registry
+        const romem = await createReadOnlyMemory(proxy, 16);
+        expect(romem.remote.address).not.toBe(0n);
+        expect(romem.local.length).toBe(16);
+        expect(findOverlappingRegion(romem.remote.address, 1)).toBe(romem);
+
+        // 2. Write through file channel — romem snapshot system is bypassed,
+        //    but the data should still arrive in the target
+        const dataBuf = Buffer.alloc(16);
+        dataBuf.writeUInt32LE(0x12345678, 0);
+        dataBuf.writeUInt32LE(0xaabbccdd, 8);
+        const written = await proxy.write(romem.remote, dataBuf);
+        expect(written).toBe(16);
+
+        // 3. Verify data reached the target via direct memory read
+        const directRead = process.memory.read(romem.remote, 16);
+        expect(directRead.readUInt32LE(0)).toBe(0x12345678);
+        expect(directRead.readUInt32LE(8)).toBe(0xaabbccdd);
+
+        // 4. Read back via file channel
+        const fileRead = await proxy.read(romem.remote, 16);
+        expect(fileRead.readUInt32LE(0)).toBe(0x12345678);
+        expect(fileRead.readUInt32LE(8)).toBe(0xaabbccdd);
+
+        // 5. Note: romem.local snapshot is NOT updated by file channel writes
+        //    (the file channel bypasses the romem system entirely)
+        expect(romem.local.readUInt32LE(0)).toBe(0);
+        expect(romem.local.readUInt32LE(8)).toBe(0);
+
+        // 6. Cleanup
+        expect(unregisterReadOnlyMemory(romem)).toBe(true);
+        expect(findOverlappingRegion(romem.remote.address, 1)).toBeUndefined();
+      } finally {
+        await proxy.close();
+        captured.close();
+      }
     } finally {
       cleanupThread(spawned);
     }

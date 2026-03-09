@@ -39,7 +39,8 @@ suspend thread
 - **No `WriteProcessMemory`** — memory ops use the target thread's own `msvcrt` functions
 - **Auto-discovery** — scans loaded modules lazily via `Module.scan()`
 - **Reversible** — saves full register context before hijacking; restores on `proxy.close()`
-- **CRT bridge** — resolves `msvcrt` exports (`malloc`, `calloc`, `memset`, `fopen`, `fread`, etc.) and calls them *from inside the target thread*
+- **CRT bridge** — resolves `msvcrt` exports (`malloc`, `calloc`, `memset`, `strlen`, `wcslen`, `fopen`, `fread`, etc.) and calls them *from inside the target thread*
+- **kernel32 bridge** — resolves `kernel32` exports (`LoadLibraryA/W`, `GetModuleHandleExA/W`, etc.) — all auto-bound on the proxy
 - **String args** — pass strings directly to `proxy.call()`, automatically allocated and freed
 - **Write optimization** — `romem` tracks known region contents and skips unchanged bytes automatically
 - **Heap allocator** — `NThreadHeap` pre-allocates a heap block in the target and sub-allocates from it, minimising CRT round-trips
@@ -92,7 +93,7 @@ await proxy.write(ptr, myData);
 await proxy.dealloc(ptr);
 
 // Allocate and write a null-terminated string in one step
-const strPtr = await proxy.allocString('Hello, target!');
+const strPtr = await nt.allocString(proxy, 'Hello, target!');
 
 await proxy.close(); // frees all heap blocks atomically
 ```
@@ -214,12 +215,16 @@ High-level interface returned by `inject()`. Each operation is a replaceable del
 | `call(address, ...args)` | Call a function (up to 4 args: RCX, RDX, R8, R9) |
 | `alloc(size, opts?)` | Allocate memory (`AllocOptions`: `fill`, `readonly`, `address`) |
 | `dealloc(ptr)` | Deallocate memory (routes through delegate; subclasses may use managed heap) |
-| `allocString(str, encoding?, opts?)` | Alloc + write null-terminated string (default `utf16le`) |
 | `close(suicide?)` | Release thread, or terminate with exit code |
+| `bind(name, address)` | Bind a remote function as a named method on the proxy |
 
 **Delegate setters**: `setReader`, `setWriter`, `setCaller`, `setCloser`, `setAllocer`, `setDeallocer` — replace any operation with a custom function.
 
-**CRT auto-binding**: All resolved `msvcrt` functions (including `free`) are bound as methods on the proxy (e.g. `proxy.malloc(size)`, `proxy.free(ptr)`, `proxy.fopen(path, mode)`).
+**CRT auto-binding**: All resolved `msvcrt` functions are bound as methods on the proxy (e.g. `proxy.malloc(size)`, `proxy.free(ptr)`, `proxy.strlen(str)`).
+
+**kernel32 auto-binding**: All resolved `kernel32` functions are also bound (e.g. `proxy.LoadLibraryA(name)`, `proxy.GetModuleHandleExA(flags, name, phModule)`).
+
+**`bind(name, address)`**: Creates a named property on the proxy that delegates to `this.call(address, ...args)`. Used internally for CRT/kernel32 auto-binding — also available for custom bindings.
 
 ### `CapturedThread`
 
@@ -272,6 +277,8 @@ crt.calloc   // msvcrt!calloc
 crt.realloc  // msvcrt!realloc
 crt.free     // msvcrt!free
 crt.memset   // msvcrt!memset
+crt.strlen   // msvcrt!strlen
+crt.wcslen   // msvcrt!wcslen
 crt.fopen    // msvcrt!fopen
 crt.fread    // msvcrt!fread
 crt.fwrite   // msvcrt!fwrite
@@ -282,28 +289,62 @@ crt.fclose   // msvcrt!fclose
 
 ---
 
+## kernel32 Bridge
+
+`kernel32.ts` resolves `kernel32.dll` exports at load time. All values are `NativePointer` — used as `RIP` targets for `threadCall`.
+
+```typescript
+import { kernel32 } from '@cheatron/nthread';
+
+kernel32.LoadLibraryA       // kernel32!LoadLibraryA
+kernel32.LoadLibraryW       // kernel32!LoadLibraryW
+kernel32.ReadProcessMemory  // kernel32!ReadProcessMemory
+kernel32.WriteProcessMemory // kernel32!WriteProcessMemory
+kernel32.GetCurrentProcess  // kernel32!GetCurrentProcess
+kernel32.GetModuleHandleA   // kernel32!GetModuleHandleA
+kernel32.GetModuleHandleW   // kernel32!GetModuleHandleW
+kernel32.GetModuleHandleExA // kernel32!GetModuleHandleExA
+kernel32.GetModuleHandleExW // kernel32!GetModuleHandleExW
+```
+
+---
+
 ## Error Hierarchy
 
 ```
 NThreadError
-  ├─ NoSleepAddressError      — no sleep gadget found
-  ├─ NoPushretAddressError     — no pushret gadget found
+  ├─ NoSleepAddressError              — no sleep gadget found
+  ├─ NoPushretAddressError             — no pushret gadget found
+  ├─ ThreadReadNotImplementedError     — threadRead not overridden
   ├─ InjectError
-  │    ├─ InjectTimeoutError   — thread didn't reach sleep in time
-  │    └─ MsvcrtNotLoadedError — msvcrt.dll not in target process
+  │    ├─ InjectTimeoutError           — thread didn't reach sleep in time
+  │    └─ MsvcrtNotLoadedError         — msvcrt.dll not in target process
   ├─ CallError
-  │    ├─ CallNotInjectedError — call before inject
-  │    ├─ CallTooManyArgsError — more than 4 args
-  │    ├─ CallRipMismatchError — RIP not at sleep before call
-  │    ├─ CallTimeoutError     — function didn't return in time
-  │    └─ CallThreadDiedError  — thread exited during call (e.g. ExitThread)
+  │    ├─ CallNotInjectedError         — call before inject
+  │    ├─ CallTooManyArgsError         — more than 4 args
+  │    ├─ CallRipMismatchError         — RIP not at sleep before call
+  │    ├─ CallTimeoutError             — function didn't return in time
+  │    └─ CallThreadDiedError          — thread exited during call
+  ├─ ReadError
+  │    └─ ReadSizeRequiredError        — read(NativePointer) without size
   ├─ WriteError
-  │    └─ WriteSizeRequiredError — NativePointer write without size
+  │    ├─ WriteSizeRequiredError       — NativePointer write without size
+  │    └─ WriteFailedError             — write returned wrong byte count
   ├─ AllocError
-  │    └─ ReallocNullError     — realloc with null address
-  ├─ FileError                 — fopen returned NULL
+  │    ├─ CallocNullError              — calloc returned NULL
+  │    └─ ReallocNullError             — realloc returned NULL
+  ├─ ProxyError
+  │    ├─ ProxyReadNotConfiguredError  — read delegate not set, no Process
+  │    ├─ ProxyWriteNotConfiguredError — write delegate not set, no Process
+  │    └─ ProxyCallNotConfiguredError  — call delegate not set
+  ├─ HeapError
+  │    ├─ HeapInvalidSizeError         — invalid heap zone sizes
+  │    ├─ HeapAllocSizeError           — invalid alloc size
+  │    ├─ HeapZoneExhaustedError       — readonly/readwrite zone full
+  │    └─ HeapFreeInvalidError         — address not in heap
+  ├─ FileError                         — fopen returned NULL
   └─ GadgetError
-       └─ GadgetScanError      — pattern scan failed
+       └─ GadgetScanError              — pattern scan failed
 ```
 
 ---
