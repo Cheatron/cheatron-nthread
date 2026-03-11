@@ -45,6 +45,7 @@ suspend thread
 - **Write optimization** — `romem` tracks known region contents and skips unchanged bytes automatically
 - **Heap allocator** — `NThreadHeap` pre-allocates a heap block in the target and sub-allocates from it, minimising CRT round-trips
 - **File channel** — `NThreadFile` replaces RPM/WPM with bidirectional filesystem I/O through a single temp file
+- **Native function injection** — `createNativeFunctionGenerator` allocates an executable page in the target; `memmem` and `scan` inject and call a remote `memmem` for pattern scanning without any external allocator
 
 ---
 
@@ -131,6 +132,36 @@ await nthread.fileFlush(proxy, stream);
 await nthread.fileClose(proxy, stream);
 ```
 
+### Native Function Injection & Pattern Scanning
+
+```typescript
+import * as Native from '@cheatron/native';
+import { NThreadHeap } from '@cheatron/nthread';
+
+const nt = new NThreadHeap();
+const [proxy] = await nt.inject(tid);
+
+// Allocate an executable page in the target and inject memmem into it
+const gen = await nt.createNativeFunctionGenerator(proxy);
+
+// Allocate a remote buffer and write some data
+const mem = await proxy.alloc(1024, { fill: 0 });
+await proxy.write(mem, myBuffer);
+
+// Scan for a pattern — memmem is injected once, reused on every chunk
+const pattern = Native.Pattern.from('DE AD BE EF');
+for await (const offset of nt.scan(proxy, mem, pattern, undefined, gen)) {
+  console.log('Found at remote offset:', offset);
+}
+
+await proxy.dealloc(mem);
+await proxy.close();
+```
+
+> `gen` is optional: if omitted a dedicated single-function page is allocated automatically. Pass an existing generator to share the executable page with other injected native functions.
+
+---
+
 ### Read-Only Memory (`romem`)
 
 Tracks a known-content region as a `(remote, local)` pair. `proxy.write()` auto-detects overlaps and skips unchanged bytes.
@@ -174,6 +205,10 @@ new NThread(processId?, sleepAddress?, pushretAddress?, regKey?)
 | `fileRead(proxy, stream, dest)` | `fread` — `NativeMemory` or byte-count → `Buffer` |
 | `fileFlush(proxy, stream)` | `fflush` |
 | `fileClose(proxy, stream)` | `fclose` |
+| `createNativeFunctionGenerator(proxy, capacity?)` | Allocate an executable page in the target for injecting native functions |
+| `memmem(proxy, haystack, needle, gen?)` | Call remote `memmem`; injects and binds it on first use |
+| `scan(proxy, memory, pattern, chunkSize?, gen?)` | Async-iterate offsets where `pattern` matches in `memory` |
+| `createMemory(proxy)` | Returns an `NThreadMemory` (AsyncMemory) backed by the proxy |
 
 Overridable hooks (for subclasses):
 - `threadClose(proxy, captured, suicide?)` — called by `proxy.close()`
@@ -247,6 +282,32 @@ interface AllocOptions {
   address?: NativePointer;      // realloc mode: resize an existing allocation
 }
 ```
+
+### `NThreadMemory`
+
+`AsyncMemory` implementation backed by a `ProxyThread`. Implements the `@cheatron/native` `AsyncMemory` interface so any code that accepts an `AsyncMemory` can transparently work over a hijacked thread.
+
+Obtained via `nthread.createMemory(proxy)`. Used internally by `createNativeFunctionGenerator`.
+
+```typescript
+const mem = nt.createMemory(proxy);
+
+// Read / write through the proxy
+const buf = await mem.read(someNativeMemory);
+await mem.write(dest, data);
+
+// Allocate an executable page via VirtualProtect
+const execMem = await mem.alloc(
+  4096,
+  Native.MemoryProtection.EXECUTE_READWRITE,
+);
+
+// Memory protection query / change
+const info = await mem.query(dest);
+await mem.protect(dest, 4096, Native.MemoryProtection.EXECUTE_READWRITE);
+```
+
+> **Note**: When `alloc()` is called with an `EXECUTE*` protection flag, `NThreadMemory` calls `VirtualProtect` on the allocated block automatically so that injected machine code can run in it.
 
 ---
 

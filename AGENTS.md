@@ -38,6 +38,7 @@ src/
   nthread.ts          — Orchestrator (NThread class + Arg type)
   nthread-heap.ts     — NThreadHeap subclass
   nthread-file.ts     — NThreadFile subclass (filesystem I/O)
+  nthread-memory.ts   — NThreadMemory (AsyncMemory over ProxyThread)
   crt.ts              — msvcrt resolver
   kernel32.ts         — kernel32 resolver
   globals.ts          — gadget registry
@@ -108,6 +109,29 @@ Lightweight orchestrator. Does **not** extend `Native.Thread`. Holds resolved ga
 - `fileRead(proxy, stream, dest)` → `fread` — `NativeMemory` or byte-count → `Buffer`
 - `fileFlush(proxy, stream)` → `fflush`
 - `fileClose(proxy, stream)` → `fclose`
+
+**Native function injection helpers** (public methods on NThread):
+
+**`createNativeFunctionGenerator(proxy, capacity?)`**: Returns `AsyncNativeFunctionGenerator.create(this.createMemory(proxy), capacity)`. Allocates an executable page in the target process (via `NThreadMemory.alloc` with `EXECUTE_READWRITE`) suitable for injecting compiled native functions.
+
+**`memmem(proxy, haystack, needle, gen?)`**: Calls a remote `memmem` function via the hijacked thread.
+- Checks `'memmem' in proxy` — if already bound, skips injection.
+- If `gen` is not provided, auto-creates a single-function generator page sized exactly `MEMMEM_BYTES.length + 16`.
+- Calls `createMemmem(gen)` if `gen.get('memmem')` is falsy.
+- Binds the function pointer onto the proxy via `proxy.bind('memmem', ...)`.
+- Returns `NativePointer` to first match, or null pointer if not found.
+- Signature: `async memmem(proxy, haystack: NativeMemory, needle: NativeMemory, gen?): Promise<NativePointer>`
+
+**`async *scan(proxy, memory, pattern, chunkSize?, gen?)`**: Async generator scanning a remote region for a `Pattern`.
+- Pre-allocates `pattern.bytes` as a remote buffer once (critical: local Buffer addresses are not accessible in the target process).
+- Writes the pattern bytes into the remote needle allocation.
+- Constructs a `MemmemFn` closure that calls `this.memmem()` per chunk.
+- Delegates to `Native.Scanner.scan(memory, pattern, memmemFn, chunkSize)` via `yield*`.
+- Deallocates the remote needle in a `finally` block.
+- `memmem` is injected once on first chunk, then reused via the proxy binding.
+- `gen` is optional; pass a shared generator page to avoid multiple executable allocations.
+
+**`createMemory(proxy)`**: Returns `new NThreadMemory(this, proxy)` — exposes the proxy as an `AsyncMemory` for use with `@cheatron/native` APIs such as `AsyncNativeFunctionGenerator`.
 
 **Overridable hooks** (protected, called by the proxy delegates):
 - `threadClose(proxy, captured, suicide?)` — default: `terminate(suicide)` then `captured.close()`
@@ -202,6 +226,28 @@ interface AllocOptions {
   address?: NativePointer;      // realloc mode: resize this existing allocation
 }
 ```
+
+### `HeapAlloc` interface (`memory/heap.ts`)
+
+```typescript
+interface HeapAlloc {
+  readonly remote: Native.NativeMemory;  // allocated region (address + size)
+}
+```
+
+**Note**: The `size` field was removed — use `alloc.remote.size` everywhere. `NativeMemory` already carries `.size`; a separate field was redundant and caused confusion.
+
+### `NThreadMemory` (`nthread-memory.ts`) — AsyncMemory over ProxyThread
+
+Implements `AsyncMemory` from `@cheatron/native`. Routes `read`/`write`/`alloc`/`free`/`protect`/`query` through a `ProxyThread` + owning `NThread`. Required by `AsyncNativeFunctionGenerator` and any other `@cheatron/native` API that expects an `AsyncMemory`.
+
+**Obtained via**: `nthread.createMemory(proxy)` (returns `new NThreadMemory(this, proxy)`).
+
+**`alloc(size, protection?, ...)`**: Calls `proxy.alloc(size)` (through the configured delegate — CRT malloc or heap slab). If `protection` includes any `EXECUTE*` flag (`EXECUTE | EXECUTE_READ | EXECUTE_READWRITE | EXECUTE_WRITECOPY`), calls `this.protect(mem, size, protection)` immediately after allocation so injected native code can execute in the block.
+
+**`protect(address, size, newProtect)`**: Calls `proxy.VirtualProtect(address, BigInt(size), BigInt(newProtect), oldProtectBuf.address)`. Allocates a 4-byte scratch buffer for the old-protection output. Reads back the DWORD via `Native.currentProcess.memory.read()` (direct local read — avoids `proxy.read()` which throws `ThreadReadNotImplementedError` on the base class). Frees scratch in `finally`.
+
+**`query(address)`**: delegates to `nthread.queryMemory(proxy, address)`.
 
 ## 3. Gadget Registry (`globals.ts`)
 
@@ -303,7 +349,8 @@ Typescript-native write optimization. Tracks `(remote: NativePointer, local: Buf
 
 ## 8. Dependencies
 
-- **`@cheatron/native`**: `NativePointer`, `NativeMemory`, `IPointer`, `Thread`, `Module`, `Pattern`, `Scanner`, `currentProcess`, `ContextFlags`, `MemoryState`, `MemoryProtection`, `resolveEncoding`, `stackAlign16`
+- **`@cheatron/native`**: `NativePointer`, `NativeMemory`, `IPointer`, `Thread`, `Module`, `Pattern`, `Scanner`, `AsyncNativeFunctionGenerator`, `createMemmem`, `MemmemFn`, `currentProcess`, `ContextFlags`, `MemoryState`, `MemoryProtection`, `resolveEncoding`, `stackAlign16`
+- **`@cheatron/native/dist/msvcrt-ext`**: `MEMMEM_BYTES` — raw x64 machine code for the injected `memmem` implementation (not re-exported from the main `@cheatron/native` index; imported directly from the dist path)
 - **`@cheatron/keystone`**: `KeystoneX86` for assembling gadget patterns during auto-discovery
 - **`@cheatron/log`**: Shared logger, re-exported from `@cheatron/native`
 - **`@cheatron/win32-ext`**: `GetModuleHandleExFlag` for module detection
@@ -316,7 +363,7 @@ Typescript-native write optimization. Tracks `(remote: NativePointer, local: Buf
 
 ### Test structure
 - `tests/crt.test.ts` — verifies CRT function pointer resolution
-- `tests/heap.test.ts` — `Heap` slab allocator: alloc, free, reuse, write, destroy
-- `tests/nthread.test.ts` — inject into `jmp .` thread, verify context, `proxy.write()`, `allocString`, `ExitThread(42)` via `proxy.call()`
+- `tests/heap.test.ts` — `Heap` slab allocator: alloc, free, reuse (`alloc.remote.size`), write, destroy
+- `tests/nthread.test.ts` — inject into `jmp .` thread, verify context, `proxy.write()`, `allocString`, `ExitThread(42)` via `proxy.call()`, pattern scan via `nt.scan()` (60s timeout: allocates 1024-byte buffer, writes `DE AD BE EF` at 3 offsets, verifies 3 matches)
 - `tests/nthread-file.test.ts` — file channel inject, write/read through file channel, large buffer, `allocString`, `proxy.close()` cleanup
 - `tests/romem.test.ts` — `createReadOnlyMemory`, skip-write for identical data, snapshot updates, `unregisterReadOnlyMemory`
