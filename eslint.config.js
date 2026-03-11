@@ -15,6 +15,9 @@ export default tseslint.config(
         ...globals.browser,
         ...globals.node,
       },
+      parserOptions: {
+        project: "./tsconfig.eslint.json"
+      }
     },
     rules: {
       'no-unused-vars': 'off',

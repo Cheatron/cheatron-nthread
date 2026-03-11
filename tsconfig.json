@@ -33,7 +33,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "baseUrl": "."
+    "baseUrl": ".",
+    "paths": {
+      "@cheatron/nthread": ["./dist/index.js"],
+      "@cheatron/nthread/*": ["./dist/*.js"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]
