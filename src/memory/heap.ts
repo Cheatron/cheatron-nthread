@@ -1,18 +1,18 @@
 import * as Native from '@cheatron/native';
-import type { ProxyThread } from '../thread/proxy-thread.js';
+import type { ProxyThread } from '../thread/proxy-thread';
 import {
   registerReadOnlyMemory,
   unregisterReadOnlyMemory,
   type ReadOnlyMemory,
-} from './romem.js';
-import { crt } from '../crt.js';
+} from './romem';
+import { crtFunctions } from '../crt';
 import {
   CallocNullError,
   HeapInvalidSizeError,
   HeapAllocSizeError,
   HeapZoneExhaustedError,
   HeapFreeInvalidError,
-} from '../errors.js';
+} from '../errors';
 
 /** Default total heap size (bytes) */
 export const DEFAULT_HEAP_SIZE = 16384;
@@ -21,8 +21,6 @@ export const DEFAULT_HEAP_SIZE = 16384;
 export interface HeapAlloc {
   /** Remote address in the target process (includes allocation size) */
   readonly remote: Native.NativeMemory;
-  /** Size of this allocation */
-  readonly size: number;
 }
 
 /** A free block in the free list */
@@ -119,7 +117,7 @@ export class Heap {
       throw new HeapInvalidSizeError(actualRoSize, rwSize);
     }
 
-    const base = await proxy.call(crt.calloc, 1, totalSize);
+    const base = await proxy.call(crtFunctions.calloc, 1, totalSize);
     if (base.address === 0n) {
       throw new CallocNullError(totalSize);
     }
@@ -262,7 +260,7 @@ export class Heap {
         this.base.address + BigInt(offset),
         size,
       );
-      return { remote, size };
+      return { remote };
     }
 
     // Bump allocate
@@ -275,7 +273,7 @@ export class Heap {
       size,
     );
     this.roOffset += size;
-    return { remote, size };
+    return { remote };
   }
 
   /**
@@ -299,7 +297,7 @@ export class Heap {
         this.base.address + BigInt(this.roSize) + BigInt(offset),
         size,
       );
-      return { remote, size };
+      return { remote };
     }
 
     // Bump allocate
@@ -312,7 +310,7 @@ export class Heap {
       size,
     );
     this.rwOffset += size;
-    return { remote, size };
+    return { remote };
   }
 
   /**
@@ -334,11 +332,11 @@ export class Heap {
     if (addr >= baseAddr && addr < roEnd) {
       // Readonly zone
       const offset = Number(addr - baseAddr);
-      Heap.insertAndCoalesce(this.roFreeList, offset, alloc.size);
+      Heap.insertAndCoalesce(this.roFreeList, offset, alloc.remote.size);
     } else if (addr >= roEnd && addr < rwEnd) {
       // ReadWrite zone — offset relative to rw zone start
       const offset = Number(addr - roEnd);
-      Heap.insertAndCoalesce(this.rwFreeList, offset, alloc.size);
+      Heap.insertAndCoalesce(this.rwFreeList, offset, alloc.remote.size);
     } else {
       throw new HeapFreeInvalidError(addr);
     }
@@ -364,6 +362,6 @@ export class Heap {
    */
   async destroy(proxy: ProxyThread): Promise<void> {
     unregisterReadOnlyMemory(this.romem);
-    await proxy.call(crt.free, this.base);
+    await proxy.call(crtFunctions.free, this.base);
   }
 }

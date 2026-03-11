@@ -1,7 +1,8 @@
 import { expect, test, describe } from 'bun:test';
 import * as Native from '@cheatron/native';
-import { NThread, Heap, findOverlappingRegion } from '../src/index.js';
+import { NThread, Heap, findOverlappingRegion } from '@cheatron/nthread';
 import { KeystoneX86 } from '@cheatron/keystone';
+import type { HeapAlloc } from 'src';
 
 describe('Heap', () => {
   test('create, alloc, free, reuse, write, and destroy', async () => {
@@ -12,9 +13,8 @@ describe('Heap', () => {
     const process = Native.currentProcess;
     const loopAddr = process.memory.alloc(
       loopBuffer.length,
-      null,
-      0x3000,
       Native.MemoryProtection.EXECUTE_READWRITE,
+      0x3000,
     );
     process.memory.write(loopAddr, loopBuffer);
 
@@ -40,7 +40,7 @@ describe('Heap', () => {
 
       // 3. Bump allocations
       const roA = heap.allocReadonly(32);
-      expect(roA.size).toBe(32);
+      expect(roA.remote.size).toBe(32);
       expect(roA.remote.address).toBe(heap.base.address);
       expect(heap.roRemaining).toBe(96);
 
@@ -49,7 +49,7 @@ describe('Heap', () => {
       expect(heap.roRemaining).toBe(64);
 
       const rwA = heap.alloc(48);
-      expect(rwA.size).toBe(48);
+      expect(rwA.remote.size).toBe(48);
       expect(rwA.remote.address).toBe(heap.rwBase.address);
       expect(heap.rwRemaining).toBe(80);
 
@@ -63,7 +63,7 @@ describe('Heap', () => {
 
       const roC = heap.allocReadonly(16); // should come from free list (first-fit)
       expect(roC.remote.address).toBe(heap.base.address); // reuses roA's slot
-      expect(roC.size).toBe(16);
+      expect(roC.remote.size).toBe(16);
 
       const roD = heap.allocReadonly(16); // remainder of roA's slot
       expect(roD.remote.address).toBe(heap.base.address + 16n);
@@ -81,7 +81,7 @@ describe('Heap', () => {
 
       const roE = heap.allocReadonly(32); // should get the coalesced block
       expect(roE.remote.address).toBe(heap.base.address);
-      expect(roE.size).toBe(32);
+      expect(roE.remote.size).toBe(32);
 
       // 7. Write to a readonly alloc — romem safe path
       const data = Buffer.alloc(32);
@@ -89,7 +89,7 @@ describe('Heap', () => {
       data.writeUInt32LE(0xcafebabe, 4);
       await proxy.write(roE.remote, data);
 
-      const readBack = process.memory.read(roE.remote, 32);
+      const readBack = process.memory.read(roE.remote.withSize(32));
       expect(readBack.readUInt32LE(0)).toBe(0xdeadbeef);
       expect(readBack.readUInt32LE(4)).toBe(0xcafebabe);
       expect(readBack.readUInt32LE(8)).toBe(0); // rest is zero
@@ -99,12 +99,12 @@ describe('Heap', () => {
       rwData.writeUInt32LE(0x12345678, 0);
       await proxy.write(rwB.remote, rwData);
 
-      const rwReadBack = process.memory.read(rwB.remote, 32);
+      const rwReadBack = process.memory.read(rwB.remote.withSize(32));
       expect(rwReadBack.readUInt32LE(0)).toBe(0x12345678);
 
       // 9. Exhaust zone then free to make space
       // Fill remaining ro bump area
-      const _roFill = heap.allocReadonly(heap.roRemaining);
+      heap.allocReadonly(heap.roRemaining);
       expect(heap.roRemaining).toBe(0);
 
       // Can't alloc more from bump
@@ -116,9 +116,8 @@ describe('Heap', () => {
       expect(roF.remote.address).toBe(heap.base.address);
 
       // 10. Invalid free — address outside heap
-      const fakeAlloc = {
-        remote: new Native.NativePointer(0xdeadn),
-        size: 4,
+      const fakeAlloc: HeapAlloc = {
+        remote: new Native.NativeMemory(0xdeadn, 4),
       };
       expect(() => heap.free(fakeAlloc)).toThrow('does not belong');
 

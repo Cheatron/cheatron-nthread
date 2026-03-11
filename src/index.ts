@@ -11,3 +11,4 @@ export * from './thread/proxy-thread';
 export * from './memory/romem';
 export * from './memory/heap';
 export * from './memory/alloc-options';
+export * from './nthread-memory';

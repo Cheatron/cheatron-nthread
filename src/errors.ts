@@ -113,12 +113,6 @@ export class CallThreadDiedError extends CallError {
 
 export class ReadError extends NThreadError {}
 
-export class ReadSizeRequiredError extends ReadError {
-  constructor() {
-    super('read: size is required when address is not a NativeMemory');
-  }
-}
-
 // ── Write errors ─────────────────────────────────────────────────────────────────
 
 export class WriteError extends NThreadError {}

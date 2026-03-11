@@ -1,5 +1,5 @@
 import * as Native from '@cheatron/native';
-import { log } from './logger.js';
+import { log } from './logger';
 import { KeystoneX86 } from '@cheatron/keystone';
 
 const globalsLog = log.child('Globals');
@@ -59,14 +59,13 @@ export function registerSleepAddress(address: Native.NativePointer): void {
 }
 
 /**
- * Retrieves a random sleep address from the pool.
- * If the pool is empty, it triggers auto-discovery.
+ * Retrieves a sleep address, preferring the dedicated allocated gadget.
+ * If the pool is empty, it triggers auto-discovery which also allocates
+ * a reliable sleep gadget in process-owned executable memory.
  */
-export function getRandomSleepAddress(): Native.NativePointer | undefined {
-  if (sleepAddresses.length === 0) {
-    autoDiscoverAddresses();
-  }
-
+export async function getRandomSleepAddress(): Promise<
+  Native.NativePointer | undefined
+> {
   if (sleepAddresses.length === 0) return undefined;
 
   const randomIndex = Math.floor(Math.random() * sleepAddresses.length);
@@ -96,11 +95,13 @@ export function registerPushretAddress(
  * 2. If no regKey is specified, search through `leastClobberedRegs` in order
  *    and return the first available gadget type found.
  */
-export function getRandomPushretAddress(
+export async function getRandomPushretAddress(
   regKey?: GeneralPurposeRegs,
-): { address: Native.NativePointer; regKey: GeneralPurposeRegs } | undefined {
+): Promise<
+  { address: Native.NativePointer; regKey: GeneralPurposeRegs } | undefined
+> {
   if (pushretAddresses.size === 0) {
-    autoDiscoverAddresses();
+    await autoDiscoverAddresses();
   }
 
   if (pushretAddresses.size === 0) return undefined;
@@ -138,7 +139,7 @@ let isAutoDiscovered = false;
  * Uses Keystone to assemble the target instructions on-the-fly to ensure
  * architecture-perfect pattern matching.
  */
-export function autoDiscoverAddresses() {
+export async function autoDiscoverAddresses() {
   if (isAutoDiscovered) return;
 
   globalsLog.info(
@@ -156,10 +157,10 @@ export function autoDiscoverAddresses() {
   const sleepCode = assembler.asm('jmp .');
   const sleepPattern = new Native.Pattern(sleepCode)
     .noLimit()
-    .addProtect(protect);
+    .setProtect(protect);
 
   const sleepRes = Native.Module.scan(sleepPattern);
-  for (const match of sleepRes.all()) {
+  for (const match of await sleepRes.getEntries()) {
     registerSleepAddress(match.pointer);
   }
 
@@ -174,11 +175,11 @@ export function autoDiscoverAddresses() {
     const pushretCode = [...pushCode, ...retCode];
     const pushretPattern = new Native.Pattern(pushretCode)
       .noLimit()
-      .addProtect(protect);
+      .setProtect(protect);
 
     // Perform process-wide cross-module scan
     const pushretRes = Native.Module.scan(pushretPattern);
-    for (const match of pushretRes.all()) {
+    for (const match of await pushretRes.getEntries()) {
       registerPushretAddress(match.pointer, regKey);
     }
   }
@@ -188,3 +189,5 @@ export function autoDiscoverAddresses() {
     `Auto-discovery complete. Found ${sleepAddresses.length} sleep gadgets and ${pushretAddresses.size} pushret gadgets.`,
   );
 }
+
+getRandomPushretAddress();

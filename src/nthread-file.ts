@@ -1,10 +1,10 @@
 import * as Native from '@cheatron/native';
-import { NThreadHeap } from './nthread-heap.js';
-import type { CapturedThread } from './thread/captured-thread.js';
-import type { ProxyThread } from './thread/proxy-thread.js';
-import type { GeneralPurposeRegs } from './globals.js';
-import { log } from './logger.js';
-import { FileError, WriteSizeRequiredError } from './errors.js';
+import { NThreadHeap } from './nthread-heap';
+import type { CapturedThread } from './thread/captured-thread';
+import type { ProxyThread } from './thread/proxy-thread';
+import type { GeneralPurposeRegs } from './globals';
+import { log } from './logger';
+import { FileError } from './errors';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -100,13 +100,13 @@ export class NThreadFile extends NThreadHeap {
     const state: FileChannelState = { filePath, stream };
 
     // Replace writer: file-based attacker→target channel
-    proxy.setWriter((_proxy, address, data, size) =>
-      this.fileChannelWrite(_proxy, state, address, data, size),
+    proxy.setWriter((_proxy, address, data) =>
+      this.fileChannelWrite(_proxy, state, address, data),
     );
 
     // Replace reader: file-based target→attacker channel
-    proxy.setReader((_proxy, address, size) =>
-      this.fileChannelRead(_proxy, state, address, size),
+    proxy.setReader((_proxy, address) =>
+      this.fileChannelRead(_proxy, state, address),
     );
 
     // Replace closer: clean up file channel, then delegate to base
@@ -160,20 +160,17 @@ export class NThreadFile extends NThreadHeap {
     proxy: ProxyThread,
     state: FileChannelState,
     address: Native.NativePointer,
-    data: Buffer | Native.NativePointer,
-    size?: number,
+    data: Buffer | Native.NativeMemory,
   ): Promise<number> {
     let buf: Buffer;
     let writeSize: number;
 
-    if (data instanceof Native.NativePointer) {
-      if (!size) throw new WriteSizeRequiredError();
-      buf = Native.currentProcess.memory.read(data, size);
-      writeSize = size;
+    if (data instanceof Native.NativeMemory) {
+      buf = Native.currentProcess.memory.read(data);
+      writeSize = data.size;
     } else {
       buf = data instanceof Buffer ? data : Buffer.from(data);
-      writeSize = size ?? buf.length;
-      if (writeSize < buf.length) buf = buf.subarray(0, writeSize);
+      writeSize = buf.length;
     }
 
     if (writeSize === 0) return 0;
@@ -205,9 +202,9 @@ export class NThreadFile extends NThreadHeap {
   protected async fileChannelRead(
     proxy: ProxyThread,
     state: FileChannelState,
-    address: Native.NativePointer,
-    size: number,
+    address: Native.NativeMemory,
   ): Promise<Buffer> {
+    const size = address.size;
     if (size === 0) return Buffer.alloc(0);
 
     // 1. Reset stream position in target

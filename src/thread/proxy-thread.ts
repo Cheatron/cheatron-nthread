@@ -1,17 +1,15 @@
 import * as Native from '@cheatron/native';
-import { crt } from '../crt.js';
-import { kernel32 } from '../kernel32.js';
-import type { Arg } from '../nthread.js';
-import type { AllocOptions } from '../memory/alloc-options.js';
+import { crtFunctions } from '../crt';
+import { kernel32Functions } from '../kernel32';
+import type { Arg } from '../nthread';
+import type { AllocOptions } from '../memory/alloc-options';
 import {
   ProxyReadNotConfiguredError,
   ProxyWriteNotConfiguredError,
   ProxyCallNotConfiguredError,
-  ReadSizeRequiredError,
   WriteFailedError,
-  WriteSizeRequiredError,
   ReallocNullError,
-} from '../errors.js';
+} from '../errors';
 
 /**
  * Type signatures for proxy operations.
@@ -19,14 +17,12 @@ import {
  */
 export type ReadMemoryFn = (
   proxy: ProxyThread,
-  address: Native.NativePointer,
-  size: number,
+  address: Native.NativeMemory,
 ) => Promise<Buffer>;
 export type WriteMemoryFn = (
   proxy: ProxyThread,
   address: Native.NativePointer,
-  data: Buffer | Native.NativePointer,
-  size?: number,
+  data: Buffer | Native.NativeMemory,
 ) => Promise<number>;
 export type CallFn = (
   proxy: ProxyThread,
@@ -140,6 +136,19 @@ export class ProxyThread {
     lpModuleName: Arg,
     phModule: Arg,
   ) => Promise<Native.NativePointer>;
+  /** `kernel32!VirtualQuery(lpAddress, lpBuffer, dwLength)` */
+  declare VirtualQuery: (
+    lpAddress: Arg,
+    lpBuffer: Arg,
+    dwLength: Arg,
+  ) => Promise<Native.NativePointer>;
+  /** `kernel32!VirtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect)` */
+  declare VirtualProtect: (
+    lpAddress: Arg,
+    dwSize: Arg,
+    flNewProtect: Arg,
+    lpflOldProtect: Arg,
+  ) => Promise<Native.NativePointer>;
 
   private _read: ReadMemoryFn;
   private _write: WriteMemoryFn;
@@ -150,28 +159,18 @@ export class ProxyThread {
 
   constructor(close: CloseFn, process?: Native.Process) {
     this._close = close;
-    this._read = async (_proxy, address, size) => {
+    this._read = async (_proxy, address) => {
       if (!process) throw new ProxyReadNotConfiguredError();
-      return process.memory.read(address, size);
+      return process.memory.read(address);
     };
 
-    this._write = async (_proxy, address, data, size) => {
+    this._write = async (_proxy, address, data) => {
       if (!process) throw new ProxyWriteNotConfiguredError();
 
-      if (data instanceof Native.NativePointer) {
-        if (size) {
-          const written = process.memory.writeWithPointer(address, data, size);
-          if (written != size) throw new WriteFailedError();
-          return written;
-        } else {
-          throw new WriteSizeRequiredError();
-        }
-      } else {
-        const writeSize = size ?? data.length;
-        const written = process.memory.write(address, data, writeSize);
-        if (written != writeSize) throw new WriteFailedError();
-        return written;
-      }
+      const len = data instanceof Native.NativeMemory ? data.size : data.length;
+      const written = process.memory.write(address, data);
+      if (written != len) throw new WriteFailedError();
+      return written;
     };
 
     this._call = async (_proxy, _address, ..._args) => {
@@ -203,16 +202,16 @@ export class ProxyThread {
 
     // Default dealloc: delegates to msvcrt!free via the call chain
     this._dealloc = async (_proxy, ptr) => {
-      await this.call(crt.free, ptr.address);
+      await this.call(crtFunctions.free, ptr.address);
     };
 
     // Auto-bind all CRT functions
-    for (const [name, address] of Object.entries(crt)) {
+    for (const [name, address] of Object.entries(crtFunctions)) {
       this.bind(name, address);
     }
 
     // Auto-bind all kernel32 functions
-    for (const [name, address] of Object.entries(kernel32)) {
+    for (const [name, address] of Object.entries(kernel32Functions)) {
       this.bind(name, address);
     }
   }
@@ -260,23 +259,16 @@ export class ProxyThread {
   }
 
   /** Reads memory from the remote process. When `address` is a `NativeMemory`, `size` defaults to `address.size`. */
-  read(address: Native.NativeMemory): Promise<Buffer>;
-  read(address: Native.NativePointer, size: number): Promise<Buffer>;
-  read(address: Native.NativePointer, size?: number): Promise<Buffer> {
-    const sz =
-      size ??
-      (address instanceof Native.NativeMemory ? address.size : undefined);
-    if (sz === undefined) throw new ReadSizeRequiredError();
-    return this._read(this, address, sz);
+  read(address: Native.NativeMemory): Promise<Buffer> {
+    return this._read(this, address);
   }
 
   /** Writes memory into the remote process */
   write(
     address: Native.NativePointer,
-    data: Buffer | Native.NativePointer,
-    size?: number,
+    data: Buffer | Native.NativeMemory,
   ): Promise<number> {
-    return this._write(this, address, data, size);
+    return this._write(this, address, data);
   }
 
   /** Calls a function, passing this proxy as context */

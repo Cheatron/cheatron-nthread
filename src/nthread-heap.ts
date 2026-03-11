@@ -1,10 +1,10 @@
 import * as Native from '@cheatron/native';
-import { NThread } from './nthread.js';
-import { Heap, type HeapAlloc } from './memory/heap.js';
-import type { CapturedThread } from './thread/captured-thread.js';
-import type { ProxyThread } from './thread/proxy-thread.js';
-import type { GeneralPurposeRegs } from './globals.js';
-import type { AllocOptions } from './memory/alloc-options.js';
+import { NThread } from './nthread';
+import { Heap, type HeapAlloc } from './memory/heap';
+import type { CapturedThread } from './thread/captured-thread';
+import type { ProxyThread } from './thread/proxy-thread';
+import type { GeneralPurposeRegs } from './globals';
+import type { AllocOptions } from './memory/alloc-options';
 
 /** Default initial heap block size (bytes). */
 export const DEFAULT_NTHREAD_HEAP_SIZE = 65536;
@@ -248,9 +248,9 @@ export class NThreadHeap extends NThread {
     if (!newRaw) s.allocations.set(newPtr.address, 'super');
 
     // Copy old content
-    const copyLen = Math.min(entry.alloc.size, newSize);
+    const copyLen = Math.min(entry.alloc.remote.size, newSize);
     if (copyLen > 0) {
-      const oldData = await proxy.read(address, copyLen);
+      const oldData = await proxy.read(address.toMemory(copyLen));
       await proxy.write(newPtr, oldData);
     }
 

@@ -1,5 +1,5 @@
 import * as Native from '@cheatron/native';
-import type { GeneralPurposeRegs } from '../globals.js';
+import type { GeneralPurposeRegs } from '../globals';
 
 export const STACK_ADD = -8192n;
 

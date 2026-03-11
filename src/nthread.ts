@@ -1,15 +1,21 @@
 import * as Native from '@cheatron/native';
-import { resolveEncoding } from '@cheatron/native';
+import {
+  resolveEncoding,
+  AsyncNativeFunctionGenerator,
+  createMemmem,
+} from '@cheatron/native';
+import { MEMMEM_BYTES } from '@cheatron/native/dist/msvcrt-ext';
 import {
   getRandomSleepAddress,
   getRandomPushretAddress,
   type GeneralPurposeRegs,
-} from './globals.js';
+} from './globals';
 import { log } from './logger';
-import { ProxyThread } from './thread/proxy-thread.js';
-import { CapturedThread } from './thread/captured-thread.js';
-import { crt } from './crt.js';
-import { kernel32 } from './kernel32.js';
+import { ProxyThread } from './thread/proxy-thread';
+import { CapturedThread } from './thread/captured-thread';
+import { NThreadMemory } from './nthread-memory';
+import { crtFunctions } from './crt';
+import { kernel32Functions } from './kernel32';
 import { GetModuleHandleExFlag } from '@cheatron/win32-ext';
 import {
   NoSleepAddressError,
@@ -20,19 +26,18 @@ import {
   CallRipMismatchError,
   CallTimeoutError,
   CallThreadDiedError,
-  WriteSizeRequiredError,
   ReallocNullError,
   ThreadReadNotImplementedError,
-} from './errors.js';
+} from './errors';
 import {
   findOverlappingRegion,
   getOverlapInfo,
   updateSnapshot,
-} from './memory/romem.js';
+} from './memory/romem';
 
-import type { AllocOptions } from './memory/alloc-options.js';
+import type { AllocOptions } from './memory/alloc-options';
 
-export { STACK_ADD } from './thread/captured-thread.js';
+export { STACK_ADD } from './thread/captured-thread';
 
 /**
  * Register-compatible argument type.
@@ -59,13 +64,13 @@ export class NThread {
   public processId?: number;
 
   /** Address of an infinite loop gadget ('jmp .') used to hold the thread */
-  public sleepAddress: Native.NativePointer;
+  public sleepAddress?: Native.NativePointer;
 
   /** Address of a pivot gadget ('push reg; ret') used to redirect execution */
-  public pushretAddress: Native.NativePointer;
+  public pushretAddress?: Native.NativePointer;
 
   /** The register key (e.g., 'Rbx') used for the pushret pivot */
-  public regKey: GeneralPurposeRegs;
+  public regKey?: GeneralPurposeRegs;
 
   /**
    * Creates an NThread instance and prepares redirect gadgets.
@@ -81,30 +86,25 @@ export class NThread {
     regKey?: GeneralPurposeRegs,
   ) {
     this.processId = processId;
+    this.sleepAddress = sleepAddress;
+    this.pushretAddress = pushretAddress;
+    this.regKey = regKey;
+  }
 
-    // 1. Resolve Sleep Address
-    if (sleepAddress) {
-      this.sleepAddress = sleepAddress;
-    } else {
-      const randomSleepAddress = getRandomSleepAddress();
-      if (!randomSleepAddress) {
-        throw new NoSleepAddressError();
-      }
-      this.sleepAddress = randomSleepAddress;
+  async setRandomSleepAddress() {
+    this.sleepAddress = await getRandomSleepAddress();
+    if (!this.sleepAddress) {
+      throw new NoSleepAddressError();
     }
+  }
 
-    // 2. Resolve PushRet Address and Key
-    if (pushretAddress !== undefined) {
-      this.pushretAddress = pushretAddress;
-      this.regKey = regKey ?? 'Rbp';
-    } else {
-      const randomPushret = getRandomPushretAddress(regKey);
-      if (!randomPushret) {
-        throw new NoPushretAddressError();
-      }
-      this.pushretAddress = randomPushret.address;
-      this.regKey = randomPushret.regKey;
+  async setRandomPushretAddress() {
+    const randomPushret = await getRandomPushretAddress(this.regKey);
+    if (!randomPushret) {
+      throw new NoPushretAddressError();
     }
+    this.pushretAddress = randomPushret.address;
+    this.regKey = randomPushret.regKey;
   }
 
   /**
@@ -122,6 +122,18 @@ export class NThread {
   async inject(
     thread: Native.Thread | number | CapturedThread,
   ): Promise<[ProxyThread, CapturedThread]> {
+    if (!this.sleepAddress) {
+      await this.setRandomSleepAddress();
+    }
+    if (!this.pushretAddress || !this.regKey) {
+      await this.setRandomPushretAddress();
+    }
+
+    // After the set calls above, all three are guaranteed non-null (they throw on failure)
+    const sleepAddress = this.sleepAddress!;
+    const pushretAddress = this.pushretAddress!;
+    const regKey = this.regKey!;
+
     // If an already-captured thread is provided, skip the hijack sequence
     // and go straight to proxy setup. No try-catch here — the caller owns the
     // CapturedThread and is responsible for cleanup on failure.
@@ -141,17 +153,12 @@ export class NThread {
       handle = thread.rawHandle;
       tid = thread.tid;
     } else {
-      const sourceThread = Native.Thread.open(thread, this.processId);
+      const sourceThread = Native.Thread.open(thread);
       handle = sourceThread.rawHandle;
       tid = sourceThread.tid;
     }
 
-    const captured = new CapturedThread(
-      handle,
-      tid,
-      this.regKey,
-      this.sleepAddress,
-    );
+    const captured = new CapturedThread(handle, tid, regKey, sleepAddress);
 
     try {
       captured.suspend();
@@ -160,7 +167,7 @@ export class NThread {
       captured.savedContext = captured.getContext();
 
       // Preserve original values to restore them later
-      const targetReg = captured.savedContext[this.regKey];
+      const targetReg = captured.savedContext[regKey];
       const rip = captured.savedContext.Rip;
       const rsp = captured.savedContext.Rsp;
 
@@ -172,15 +179,15 @@ export class NThread {
       const stackBegin = captured.calcStackBegin(BigInt(rsp));
       captured.callRsp = stackBegin - 8n;
 
-      captured.setRIP(this.pushretAddress.address);
+      captured.setRIP(pushretAddress.toBigInt());
       captured.setRSP(stackBegin);
-      captured.setTargetReg(this.sleepAddress.address);
+      captured.setTargetReg(sleepAddress.toBigInt());
 
       captured.applyContext();
       captured.resume();
 
       nthreadLog.info(
-        `Waiting for thread ${captured.tid} to reach ${this.sleepAddress}...`,
+        `Waiting for thread ${captured.tid} to reach ${sleepAddress}...`,
       );
 
       // Poll until Rip matches our infinite loop address
@@ -193,7 +200,7 @@ export class NThread {
       captured.savedContext = captured.getContext();
 
       // Restore original state into our local copy so we can resume naturally later
-      captured.savedContext[this.regKey] = targetReg;
+      captured.savedContext[regKey] = targetReg;
       captured.savedContext.Rip = rip;
       captured.savedContext.Rsp = rsp;
 
@@ -244,12 +251,10 @@ export class NThread {
     proxy.setCaller((_proxy, address, ...proxyArgs) =>
       this.threadCall(_proxy, captured, address, [...proxyArgs]),
     );
-    proxy.setWriter((_proxy, address, data, size) =>
-      this.threadWrite(_proxy, address, data, size),
+    proxy.setWriter((_proxy, address, data) =>
+      this.threadWrite(_proxy, address, data),
     );
-    proxy.setReader((_proxy, address, size) =>
-      this.threadRead(_proxy, address, size),
-    );
+    proxy.setReader((_proxy, address) => this.threadRead(_proxy, address));
     proxy.setAllocer((_proxy, size, opts) =>
       this.threadAlloc(_proxy, size, opts),
     );
@@ -280,7 +285,7 @@ export class NThread {
     const result = await this.threadCall(
       proxy,
       captured,
-      kernel32.GetModuleHandleExA,
+      kernel32Functions.GetModuleHandleExA,
       [flags, moduleBase, outPtr],
     );
     return result.address !== 0n;
@@ -289,30 +294,24 @@ export class NThread {
   /** Reads data from the target process via ReadProcessMemory. */
   private async threadRead(
     _proxy: ProxyThread,
-    _address: Native.NativePointer,
-    _size: number,
+    _address: Native.NativeMemory,
   ): Promise<Buffer> {
     throw new ThreadReadNotImplementedError();
   }
 
-  /** Writes data to the target process; dispatches NativePointer vs Buffer. */
+  /** Writes data to the target process; dispatches NativeMemory vs Buffer. */
   private async threadWrite(
     proxy: ProxyThread,
     address: Native.NativePointer,
-    data: Buffer | Native.NativePointer,
-    size?: number,
+    data: Buffer | Native.NativeMemory,
   ): Promise<number> {
-    if (data instanceof Native.NativePointer) {
-      if (!size) {
-        throw new WriteSizeRequiredError();
-      }
-      await this.writeMemoryWithPointer(proxy, address, data, size);
-      return size;
+    if (data instanceof Native.NativeMemory) {
+      await this.writeMemoryWithPointer(proxy, address, data, data.size);
+      return data.size;
     }
     const buf = data instanceof Buffer ? data : Buffer.from(data);
-    const writeSize = size ?? buf.length;
-    await this.writeMemory(proxy, address, buf.subarray(0, writeSize));
-    return writeSize;
+    await this.writeMemory(proxy, address, buf);
+    return buf.length;
   }
 
   /**
@@ -369,7 +368,7 @@ export class NThread {
     proxy: ProxyThread,
     ptr: Native.NativePointer,
   ): Promise<void> {
-    await proxy.call(crt.free, ptr.address);
+    await proxy.call(crtFunctions.free, ptr.address);
   }
 
   /**
@@ -434,6 +433,142 @@ export class NThread {
   ): Promise<number> {
     const [buf] = resolveEncoding(null, null, str);
     return proxy.write(dest, buf);
+  }
+
+  /**
+   * Queries memory information in the target process using VirtualQuery.
+   */
+  async queryMemory(
+    proxy: ProxyThread,
+    address: Native.IPointer,
+  ): Promise<Native.MemoryBasicInformation> {
+    const buf = await proxy.alloc(Native.MBI_SIZE);
+    try {
+      const res = await proxy.call(
+        kernel32Functions.VirtualQuery,
+        address.address,
+        buf.address,
+        Native.MBI_SIZE,
+      );
+      if (res.address === 0n) {
+        throw new Error(`VirtualQuery failed at ${address.toString()}`);
+      }
+      const data = await proxy.read(buf);
+      return Native.ffi.decode(
+        data,
+        Native.MEMORY_BASIC_INFORMATION,
+      ) as Native.MemoryBasicInformation;
+    } finally {
+      await proxy.dealloc(buf.address as unknown as Native.NativePointer);
+    }
+  }
+
+  /**
+   * Creates an asynchronous wrapper (AsyncProcessMemory) around the provided
+   * ProxyThread, mimicking the ProcessMemory interface. This allows safe,
+   * snapshot-backed or proxied memory operations seamlessly.
+   */
+  createMemory(proxy: ProxyThread): NThreadMemory {
+    return new NThreadMemory(this, proxy);
+  }
+
+  /**
+   * Creates an {@link AsyncNativeFunctionGenerator} backed by the hijacked thread.
+   * Allocates a single RWX executable page in the target process and lets you
+   * assemble / write native functions into it via `add()` / `addBytes()`.
+   *
+   * @param proxy The proxy returned by {@link inject}.
+   * @param capacity Page size in bytes (default 8192).
+   */
+  async createNativeFunctionGenerator(
+    proxy: ProxyThread,
+    capacity?: number,
+  ): Promise<AsyncNativeFunctionGenerator> {
+    return AsyncNativeFunctionGenerator.create(
+      this.createMemory(proxy),
+      capacity,
+    );
+  }
+
+  /**
+   * Calls the remote `memmem` function via the hijacked thread.
+   * On first call for a given proxy, injects memmem into `gen` (if supplied, else
+   * allocates a throw-away single-function page) and binds it to the proxy.
+   * Subsequent calls reuse the already-bound proxy method without touching `gen`.
+   *
+   * @param gen Optional generator page to inject memmem into. Created automatically
+   *            (sized exactly for memmem) if omitted; the page is kept alive.
+   * @returns Pointer to the first match, or a null pointer if not found.
+   */
+  async memmem(
+    proxy: ProxyThread,
+    haystack: Native.NativeMemory,
+    needle: Native.NativeMemory,
+    gen?: AsyncNativeFunctionGenerator,
+  ): Promise<Native.NativePointer> {
+    if (!('memmem' in proxy)) {
+      if (!gen) {
+        gen = await this.createNativeFunctionGenerator(
+          proxy,
+          MEMMEM_BYTES.length + 16,
+        );
+      }
+      if (!gen.get('memmem')) {
+        await createMemmem(gen);
+      }
+      proxy.bind('memmem', gen.get('memmem')!.pointer);
+    }
+
+    const proxyWithMemmem = proxy as ProxyThread & {
+      memmem: (...args: Arg[]) => Promise<Native.NativePointer>;
+    };
+
+    return proxyWithMemmem.memmem(
+      haystack.address,
+      haystack.size,
+      needle.address,
+      needle.size,
+    );
+  }
+
+  /**
+   * Scans a remote memory region for the given {@link Pattern}.
+   * Delegates to {@link memmem} for each chunk — memmem is injected and bound
+   * to the proxy on the first chunk, then reused automatically.
+   *
+   * @param proxy     The proxy returned by {@link inject}.
+   * @param memory    Remote memory region to scan.
+   * @param pattern   Pattern to search for.
+   * @param chunkSize Optional scan chunk size in bytes (default 1 MiB).
+   * @param gen       Optional generator page shared with other native functions.
+   *                  If omitted, a dedicated page is allocated automatically.
+   */
+  async *scan(
+    proxy: ProxyThread,
+    memory: Native.NativeMemory,
+    pattern: Native.Pattern,
+    chunkSize?: number,
+    gen?: AsyncNativeFunctionGenerator,
+  ): AsyncGenerator<bigint> {
+    // `pattern.bytes` is a local Buffer — Scanner passes it as the `needle` LPVOID
+    // argument, but the remote memmem cannot access local JS heap addresses.
+    // Pre-allocate the needle in the target process once and reuse it per chunk.
+    const remoteNeedle = await proxy.alloc(pattern.bytes.length);
+    await proxy.write(remoteNeedle, pattern.bytes);
+    try {
+      const memmemFn: Native.MemmemFn = async (haystack, haystackLen) => {
+        const result = await this.memmem(
+          proxy,
+          new Native.NativeMemory(haystack, Number(haystackLen)),
+          remoteNeedle,
+          gen,
+        );
+        return result.raw;
+      };
+      yield* Native.Scanner.scan(memory, pattern, memmemFn, chunkSize);
+    } finally {
+      await proxy.dealloc(remoteNeedle);
+    }
   }
 
   // ─── File I/O helpers ──────────────────────────────────────────────────────
@@ -738,7 +873,7 @@ export class NThread {
 
       const runLen = j - i;
       const addr = await proxy.call(
-        crt.memset,
+        crtFunctions.memset,
         destAddr + BigInt(i),
         value,
         runLen,
@@ -771,7 +906,11 @@ export class NThread {
     size: number,
   ): Promise<number> {
     const destAddr = dest instanceof Native.NativePointer ? dest.address : dest;
-    const buf = Native.currentProcess.memory.read(source, size);
+    const buf = Native.currentProcess.memory.read(
+      source instanceof Native.NativeMemory
+        ? source
+        : new Native.NativeMemory(source.address, size),
+    );
     if (buf.length === 0) return 0;
 
     // Standard decomposed memset — no romem check
@@ -785,7 +924,7 @@ export class NThread {
 
       const runLen = j - i;
       const addr = await proxy.call(
-        crt.memset,
+        crtFunctions.memset,
         destAddr + BigInt(i),
         value,
         runLen,
@@ -843,7 +982,7 @@ export class NThread {
 
       const runLen = j - i;
       const addr = await proxy.call(
-        crt.memset,
+        crtFunctions.memset,
         destAddr + BigInt(i),
         value,
         runLen,
@@ -881,7 +1020,7 @@ export class NThread {
 
       const runLen = j - i;
       const addr = await proxy.call(
-        crt.memset,
+        crtFunctions.memset,
         destAddr + BigInt(i),
         value,
         runLen,

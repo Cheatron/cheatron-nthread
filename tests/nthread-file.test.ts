@@ -7,8 +7,8 @@ import {
   createReadOnlyMemory,
   unregisterReadOnlyMemory,
   findOverlappingRegion,
-} from '../src/index.js';
-import { spawnLoopThread, cleanupThread } from './helpers.js';
+} from '@cheatron/nthread';
+import { spawnLoopThread, cleanupThread } from './helpers';
 
 describe('NThreadFile', () => {
   test('should inject and establish file channel', async () => {
@@ -104,7 +104,7 @@ describe('NThreadFile', () => {
         const asciiPtr = await nt.allocString(proxy, asciiStr);
         expect(asciiPtr.address).not.toBe(0n);
 
-        const asciiBuf = process.memory.read(asciiPtr, asciiStr.length + 1);
+        const asciiBuf = process.memory.read(asciiPtr);
         expect(asciiBuf.toString('utf8', 0, asciiStr.length)).toBe(asciiStr);
         expect(asciiBuf[asciiStr.length]).toBe(0);
         await proxy.dealloc(asciiPtr);
@@ -115,10 +115,7 @@ describe('NThreadFile', () => {
         expect(unicodePtr.address).not.toBe(0n);
 
         const unicodeEncoded = Buffer.from(unicodeStr, 'utf16le');
-        const unicodeBuf = process.memory.read(
-          unicodePtr,
-          unicodeEncoded.length + 2,
-        );
+        const unicodeBuf = process.memory.read(unicodePtr);
         expect(unicodeBuf.toString('utf16le', 0, unicodeEncoded.length)).toBe(
           unicodeStr,
         );
@@ -177,14 +174,13 @@ describe('NThreadFile', () => {
       const MAGIC = 0xcafebabe;
       const testMem = process.memory.alloc(
         4,
-        null,
-        Native.MemoryState.COMMIT,
         Native.MemoryProtection.READWRITE,
+        Native.MemoryState.COMMIT | Native.MemoryState.RESERVE,
       );
       const magicBuf = Buffer.alloc(4);
       magicBuf.writeUInt32LE(MAGIC);
       await baseProxy.write(testMem, magicBuf);
-      const readBuf = process.memory.read(testMem, 4);
+      const readBuf = process.memory.read(testMem);
       expect(readBuf.readUInt32LE(0)).toBe(MAGIC);
       process.memory.free(testMem);
 
@@ -212,7 +208,7 @@ describe('NThreadFile', () => {
       const testStr = 'Cross-inject works!';
       const strPtr = await ntFile.allocString(fileProxy, testStr);
       expect(strPtr.address).not.toBe(0n);
-      const strBuf = process.memory.read(strPtr, testStr.length + 1);
+      const strBuf = process.memory.read(strPtr);
       expect(strBuf.toString('utf8', 0, testStr.length)).toBe(testStr);
       expect(strBuf[testStr.length]).toBe(0);
       await fileProxy.dealloc(strPtr);
@@ -244,7 +240,7 @@ describe('NThreadFile', () => {
       try {
         // 1. Allocate a readonly region via the heap (zero-filled)
         const size = 32;
-        const ptr = await proxy.alloc(size, { readonly: true });
+        const ptr = await proxy.alloc(size, { readonly: true, fill: 0 });
         expect(ptr.address).not.toBe(0n);
         expect(ptr.size).toBe(size);
 
@@ -269,7 +265,7 @@ describe('NThreadFile', () => {
         expect(readBack.readUInt32LE(20)).toBe(0);
 
         // 4. Cross-verify via direct process memory read
-        const directRead = process.memory.read(ptr, size);
+        const directRead = process.memory.read(ptr);
         expect(Buffer.compare(directRead, pattern)).toBe(0);
 
         // 5. Dealloc the readonly region (should go through heap free, not CRT)
@@ -307,12 +303,12 @@ describe('NThreadFile', () => {
         expect(written).toBe(16);
 
         // 3. Verify data reached the target via direct memory read
-        const directRead = process.memory.read(romem.remote, 16);
+        const directRead = process.memory.read(romem.remote.withSize(16));
         expect(directRead.readUInt32LE(0)).toBe(0x12345678);
         expect(directRead.readUInt32LE(8)).toBe(0xaabbccdd);
 
         // 4. Read back via file channel
-        const fileRead = await proxy.read(romem.remote, 16);
+        const fileRead = await proxy.read(romem.remote.withSize(16));
         expect(fileRead.readUInt32LE(0)).toBe(0x12345678);
         expect(fileRead.readUInt32LE(8)).toBe(0xaabbccdd);
 

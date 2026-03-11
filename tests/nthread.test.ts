@@ -1,7 +1,7 @@
 import { expect, test, describe } from 'bun:test';
 import * as Native from '@cheatron/native';
-import { NThread, CallThreadDiedError } from '../src/index.js';
-import { spawnLoopThread, cleanupThread } from './helpers.js';
+import { NThread, CallThreadDiedError } from '@cheatron/nthread';
+import { spawnLoopThread, cleanupThread } from './helpers';
 
 describe('NThread', () => {
   test('should be exported', () => {
@@ -26,16 +26,15 @@ describe('NThread', () => {
       const testSize = 4;
       const testMem = process.memory.alloc(
         testSize,
-        null,
-        Native.MemoryState.COMMIT,
         Native.MemoryProtection.READWRITE,
+        Native.MemoryState.COMMIT | Native.MemoryState.RESERVE,
       );
       expect(testMem.address).not.toBe(0n);
 
       const magicBuf = Buffer.alloc(4);
       magicBuf.writeUInt32LE(MAGIC);
       await proxy.write(testMem, magicBuf);
-      const readBuf = process.memory.read(testMem, testSize);
+      const readBuf = process.memory.read(testMem);
       expect(readBuf.readUInt32LE(0)).toBe(MAGIC);
       process.memory.free(testMem);
 
@@ -69,7 +68,7 @@ describe('NThread', () => {
         const asciiStr = 'Hello, NThread!';
         const asciiPtr = await nthread.allocString(proxy, asciiStr);
         expect(asciiPtr.address).not.toBe(0n);
-        const asciiBuf = process.memory.read(asciiPtr, asciiStr.length + 1);
+        const asciiBuf = process.memory.read(asciiPtr);
         expect(asciiBuf.toString('utf8', 0, asciiStr.length)).toBe(asciiStr);
         expect(asciiBuf[asciiStr.length]).toBe(0);
         await proxy.dealloc(asciiPtr);
@@ -79,10 +78,7 @@ describe('NThread', () => {
         const unicodePtr = await nthread.allocString(proxy, unicodeStr);
         expect(unicodePtr.address).not.toBe(0n);
         const unicodeEncoded = Buffer.from(unicodeStr, 'utf16le');
-        const unicodeBuf = process.memory.read(
-          unicodePtr,
-          unicodeEncoded.length + 2,
-        );
+        const unicodeBuf = process.memory.read(unicodePtr);
         expect(unicodeBuf.toString('utf16le', 0, unicodeEncoded.length)).toBe(
           unicodeStr,
         );
@@ -96,4 +92,48 @@ describe('NThread', () => {
       cleanupThread(spawned);
     }
   });
+
+  test('scan — finds all occurrences of a pattern in remote memory', async () => {
+    const spawned = await spawnLoopThread();
+
+    try {
+      const nthread = new NThread();
+      const [proxy, captured] = await nthread.inject(spawned.tid);
+
+      try {
+        const SIZE = 1024;
+        // Allocate zeroed buffer in target process
+        const mem = await proxy.alloc(SIZE, { fill: 0 });
+
+        // Write a distinct 4-byte marker at three known offsets
+        const MARKER = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+        const OFFSETS = [0, 256, 700];
+        for (const off of OFFSETS) {
+          await proxy.write(
+            new Native.NativePointer(mem.address + BigInt(off)),
+            MARKER,
+          );
+        }
+
+        // Scan for the marker pattern
+        const pattern = new Native.Pattern('DE AD BE EF');
+        const found: bigint[] = [];
+        for await (const addr of nthread.scan(proxy, mem, pattern)) {
+          found.push(addr);
+        }
+
+        expect(found.length).toBe(OFFSETS.length);
+        for (const off of OFFSETS) {
+          expect(found).toContain(mem.address + BigInt(off));
+        }
+
+        await proxy.dealloc(mem);
+      } finally {
+        await proxy.close();
+        captured.close();
+      }
+    } finally {
+      cleanupThread(spawned);
+    }
+  }, 60000);
 });

@@ -1,5 +1,5 @@
 import * as Native from '@cheatron/native';
-import { log } from './logger.js';
+import { log } from './logger';
 
 /**
  * CRTFunctions: A collection of standard C Runtime functions resolved in the target process.
@@ -36,7 +36,7 @@ const get = (name: string): Native.NativePointer => {
  * Global CRT function pointers.
  * These are initialized lazily or on import to be used globally by other components.
  */
-export const crt: CRTFunctions = {
+export const crtFunctions: CRTFunctions = {
   fopen: get('fopen'),
   memset: get('memset'),
   malloc: get('malloc'),

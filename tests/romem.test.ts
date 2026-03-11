@@ -5,8 +5,8 @@ import {
   createReadOnlyMemory,
   unregisterReadOnlyMemory,
   findOverlappingRegion,
-} from '../src/index.js';
-import { spawnLoopThread, cleanupThread } from './helpers.js';
+} from '@cheatron/nthread';
+import { spawnLoopThread, cleanupThread } from './helpers';
 
 describe('ReadOnlyMemory', () => {
   test('createReadOnlyMemory allocates via calloc and writeMemory uses safe path', async () => {
@@ -27,9 +27,9 @@ describe('ReadOnlyMemory', () => {
 
       // 3. Write identical data (all zeroes) — safeBuffer should skip everything
       expect(await proxy.write(romem.remote, Buffer.alloc(16))).toBe(16);
-      expect(process.memory.read(romem.remote, 16).every((b) => b === 0)).toBe(
-        true,
-      );
+      expect(
+        process.memory.read(romem.remote.withSize(16)).every((b) => b === 0),
+      ).toBe(true);
 
       // 4. Write actual data — only changed bytes are written
       const dataBuf = Buffer.alloc(16);
@@ -37,7 +37,7 @@ describe('ReadOnlyMemory', () => {
       dataBuf.writeUInt32LE(0xcafebabe, 8);
       expect(await proxy.write(romem.remote, dataBuf)).toBe(16);
 
-      const rb = process.memory.read(romem.remote, 16);
+      const rb = process.memory.read(romem.remote.withSize(16));
       expect(rb.readUInt32LE(0)).toBe(0xdeadbeef);
       expect(rb.readUInt32LE(4)).toBe(0);
       expect(rb.readUInt32LE(8)).toBe(0xcafebabe);
@@ -49,16 +49,15 @@ describe('ReadOnlyMemory', () => {
 
       // 6. Same data again — safeBuffer skips all (idempotent)
       expect(await proxy.write(romem.remote, dataBuf)).toBe(16);
-      const rb2 = process.memory.read(romem.remote, 16);
+      const rb2 = process.memory.read(romem.remote.withSize(16));
       expect(rb2.readUInt32LE(0)).toBe(0xdeadbeef);
       expect(rb2.readUInt32LE(8)).toBe(0xcafebabe);
 
       // 7. Unregister
       const scratchAddr = process.memory.alloc(
         4,
-        null,
-        Native.MemoryState.COMMIT,
         Native.MemoryProtection.READWRITE,
+        Native.MemoryState.COMMIT | Native.MemoryState.RESERVE,
       );
       expect(unregisterReadOnlyMemory(romem)).toBe(true);
       expect(findOverlappingRegion(romem.remote.address, 1)).toBeUndefined();

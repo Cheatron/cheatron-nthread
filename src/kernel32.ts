@@ -1,5 +1,5 @@
 import * as Native from '@cheatron/native';
-import { log } from './logger.js';
+import { log } from './logger';
 
 /**
  * Kernel32Functions: function pointers resolved from kernel32.dll in the
@@ -15,6 +15,8 @@ export interface Kernel32Functions {
   GetModuleHandleW: Native.NativePointer;
   GetModuleHandleExA: Native.NativePointer;
   GetModuleHandleExW: Native.NativePointer;
+  VirtualQuery: Native.NativePointer;
+  VirtualProtect: Native.NativePointer;
 }
 
 const get = (name: string): Native.NativePointer => {
@@ -23,7 +25,7 @@ const get = (name: string): Native.NativePointer => {
   return addr;
 };
 
-export const kernel32: Kernel32Functions = {
+export const kernel32Functions: Kernel32Functions = {
   LoadLibraryA: get('LoadLibraryA'),
   LoadLibraryW: get('LoadLibraryW'),
   ReadProcessMemory: get('ReadProcessMemory'),
@@ -33,4 +35,6 @@ export const kernel32: Kernel32Functions = {
   GetModuleHandleW: get('GetModuleHandleW'),
   GetModuleHandleExA: get('GetModuleHandleExA'),
   GetModuleHandleExW: get('GetModuleHandleExW'),
+  VirtualQuery: get('VirtualQuery'),
+  VirtualProtect: get('VirtualProtect'),
 };

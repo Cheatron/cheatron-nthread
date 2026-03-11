@@ -19,9 +19,8 @@ export async function spawnLoopThread(): Promise<SpawnedThread> {
   const proc = Native.currentProcess;
   const loopAddr = proc.memory.alloc(
     loopBuffer.length,
-    null,
-    Native.MemoryState.COMMIT,
     Native.MemoryProtection.EXECUTE_READWRITE,
+    Native.MemoryState.COMMIT,
   );
   proc.memory.write(loopAddr, loopBuffer);
   const thread = Native.Thread.create(loopAddr, null);
