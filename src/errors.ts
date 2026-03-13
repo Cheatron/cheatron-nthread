@@ -31,6 +31,18 @@ export class InjectTimeoutError extends InjectError {
   }
 }
 
+export class InjectAbortedError extends InjectError {
+  constructor() {
+    super('Thread injection was aborted');
+  }
+}
+
+export class WaitAbortedError extends NThreadError {
+  constructor() {
+    super('Thread wait was aborted');
+  }
+}
+
 export class MsvcrtNotLoadedError extends InjectError {
   constructor() {
     super("msvcrt.dll is not loaded in the target thread's process");

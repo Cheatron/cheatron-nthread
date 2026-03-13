@@ -1,5 +1,6 @@
 import * as Native from '@cheatron/native';
 import type { GeneralPurposeRegs } from '../globals';
+import { WaitAbortedError } from '../errors';
 
 export const STACK_ADD = -8192n;
 
@@ -28,6 +29,9 @@ export class CapturedThread extends Native.Thread {
 
   /** The register key (e.g., 'Rbx') used for the pushret pivot */
   public regKey: GeneralPurposeRegs;
+
+  /** Poll cadence used by wait() loop in milliseconds (min 0) */
+  public pollIntervalMs: number = 1;
 
   /**
    * Creates a CapturedThread instance.
@@ -162,10 +166,19 @@ export class CapturedThread extends Native.Thread {
    */
   override async wait(
     timeoutMs: number = Native.INFINITE,
+    signal?: AbortSignal,
   ): Promise<Native.WaitReturn> {
-    let count = 0;
+    const pollIntervalMs = Math.max(0, this.pollIntervalMs | 0);
+    const deadline =
+      timeoutMs === Native.INFINITE
+        ? Number.POSITIVE_INFINITY
+        : Date.now() + timeoutMs;
 
-    while (count < timeoutMs) {
+    while (Date.now() < deadline) {
+      if (signal?.aborted) {
+        throw new WaitAbortedError();
+      }
+
       try {
         this.fetchContext();
         const rip = this.getContext().Rip;
@@ -180,10 +193,45 @@ export class CapturedThread extends Native.Thread {
         return res;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      count++;
+      if (pollIntervalMs === 0) {
+        await this.sleepAbortable(0, signal);
+        continue;
+      }
+
+      const remainingMs = deadline - Date.now();
+      const sleepMs = Math.min(pollIntervalMs, remainingMs);
+      await this.sleepAbortable(sleepMs, signal);
     }
 
     return Native.WaitReturn.TIMEOUT;
+  }
+
+  private async sleepAbortable(
+    ms: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!signal) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+
+    if (signal.aborted) {
+      throw new WaitAbortedError();
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        reject(new WaitAbortedError());
+      };
+
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 }

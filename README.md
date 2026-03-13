@@ -197,7 +197,7 @@ new NThread(processId?, sleepAddress?, pushretAddress?, regKey?)
 
 | Method | Description |
 |--------|-------------|
-| `inject(thread)` | Hijack a thread (TID or `Thread`), returns `[ProxyThread, CapturedThread]` |
+| `inject(thread, options?)` | Hijack a thread (TID or `Thread`), returns `[ProxyThread, CapturedThread]` |
 | `allocString(proxy, str, opts?)` | Allocate + write a null-terminated string |
 | `writeString(proxy, dest, str)` | Write a null-terminated string to an existing address |
 | `fileOpen(proxy, path, mode)` | `fopen` in the target; auto-allocates/frees string args |
@@ -379,6 +379,7 @@ NThreadError
   ├─ ThreadReadNotImplementedError     — threadRead not overridden
   ├─ InjectError
   │    ├─ InjectTimeoutError           — thread didn't reach sleep in time
+  │    ├─ InjectAbortedError           — injection cancelled via `AbortSignal`
   │    └─ MsvcrtNotLoadedError         — msvcrt.dll not in target process
   ├─ CallError
   │    ├─ CallNotInjectedError         — call before inject

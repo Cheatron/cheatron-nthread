@@ -1,7 +1,16 @@
 import { expect, test, describe } from 'bun:test';
 import * as Native from '@cheatron/native';
-import { NThread, CallThreadDiedError } from '@cheatron/nthread';
-import { spawnLoopThread, cleanupThread } from './helpers';
+import {
+  NThread,
+  CallThreadDiedError,
+  InjectAbortedError,
+} from '@cheatron/nthread';
+import {
+  spawnLoopThread,
+  cleanupThread,
+  spawnSleepThread,
+  cleanupSleepThread,
+} from './helpers';
 
 describe('NThread', () => {
   test('should be exported', () => {
@@ -90,6 +99,43 @@ describe('NThread', () => {
       }
     } finally {
       cleanupThread(spawned);
+    }
+  });
+
+  test('inject — supports AbortSignal cancellation', async () => {
+    const spawned = await spawnLoopThread();
+
+    try {
+      const nthread = new NThread();
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        nthread.inject(spawned.tid, { signal: controller.signal }),
+      ).rejects.toBeInstanceOf(InjectAbortedError);
+    } finally {
+      cleanupThread(spawned);
+    }
+  });
+
+  test('inject — aborts while target thread is in Sleep syscall', async () => {
+    const spawned = await spawnSleepThread(5000);
+
+    try {
+      const nthread = new NThread();
+      const controller = new AbortController();
+      const injectPromise = nthread.inject(spawned.tid, {
+        signal: controller.signal,
+        timeoutMs: 10000,
+        pollIntervalMs: 10,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      controller.abort();
+
+      await expect(injectPromise).rejects.toBeInstanceOf(InjectAbortedError);
+    } finally {
+      cleanupSleepThread(spawned);
     }
   });
 

@@ -69,11 +69,17 @@ Lightweight orchestrator. Does **not** extend `Native.Thread`. Holds resolved ga
 
 **Constructor**: `(processId?, sleepAddress?, pushretAddress?, regKey?)` — resolves gadgets from the global registry if not explicitly provided.
 
-**`inject(thread: Native.Thread | number | CapturedThread)`**: Two paths:
+**`inject(thread: Native.Thread | number | CapturedThread, options?: InjectOptions)`**: Two paths:
 
 1. **CapturedThread path**: If `thread instanceof CapturedThread`, skips hijack sequence entirely → calls `setupProxy(thread)` + `ensureCrtLoaded()`. No try-catch — the caller owns the CapturedThread and is responsible for cleanup on failure.
 
-2. **Normal path**: Resolves handle + tid from `Thread` object or TID number → creates `CapturedThread(handle, tid, regKey, sleepAddress)` → performs hijack sequence → polls `wait()` → calls `setupProxy()` + `ensureCrtLoaded()` → returns `[ProxyThread, CapturedThread]`. On error, calls `captured.release()` to restore the thread.
+2. **Normal path**: Resolves handle + tid from `Thread` object or TID number → creates `CapturedThread(handle, tid, regKey, sleepAddress)` → performs hijack sequence → calls `captured.wait(timeoutMs, signal)` (poll cadence is handled internally by `captured.pollIntervalMs`) → calls `setupProxy()` + `ensureCrtLoaded()` → returns `[ProxyThread, CapturedThread]`. On error, calls `captured.release()` to restore the thread.
+
+**Cancellation support**:
+- `options.signal` accepts an `AbortSignal` for active cancellation.
+- `options.timeoutMs` controls total wait timeout (default `5000`).
+- `options.pollIntervalMs` is persisted into `captured.pollIntervalMs` (default `50`, min `1`) and used by `CapturedThread.wait()` polling cadence.
+- If aborted, `InjectAbortedError` is thrown. In normal-path hijack flow, the catch block restores the original thread context via `captured.release()`.
 
 **`setupProxy(captured)`** (protected, overridable): Creates a `ProxyThread` and wires all delegates:
 - `_close` → `nthread.threadClose(captured, ...)`
@@ -148,7 +154,7 @@ Extends `Native.Thread` from `@cheatron/native`. Owns all low-level thread state
 - `latestContext`: in-memory cache. `getContext()` / `setContext()` operate on this.
 - Hardware: `fetchContext()` reads from hardware → cache. `applyContext()` writes cache → hardware.
 
-**Fields**: `suspendCount`, `savedContext`, `latestContext`, `callRsp: bigint = 0n`, `sleepAddress`, `regKey`.
+**Fields**: `suspendCount`, `savedContext`, `latestContext`, `callRsp: bigint = 0n`, `sleepAddress`, `regKey`, `pollIntervalMs: number = 1`.
 
 **`suspend()`**: Always increments `suspendCount` after a successful call. `SuspendThread` returns the *previous* suspend count (0 when the thread was running) — this is falsy in JS, so the increment is unconditional.
 
@@ -156,7 +162,7 @@ Extends `Native.Thread` from `@cheatron/native`. Owns all low-level thread state
 
 **`close()`**: Calls `release()` (try-catch for dead threads), drains remaining `suspendCount`, then `super.close()`.
 
-**`wait()` implementation**: Polls `fetchContext()` in a loop, checking `BigInt(rip) === sleepAddress.address`. On `fetchContext()` throw → `super.wait(0)` to detect termination.
+**`wait(timeoutMs?, signal?)` implementation**: Polls `fetchContext()` in a loop, checking `BigInt(rip) === sleepAddress.address`. Sleep cadence is controlled by `this.pollIntervalMs` (min `1`). If `signal` aborts, throws `WaitAbortedError`. On `fetchContext()` throw → `super.wait(0)` to detect termination.
 
 **`calcStackBegin(baseRsp)`**: Computes `stackAlign16(baseRsp + STACK_ADD)` where `STACK_ADD = -8192n`. Parameter is the **current RSP value**.
 

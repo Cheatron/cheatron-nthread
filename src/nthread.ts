@@ -21,6 +21,7 @@ import {
   NoSleepAddressError,
   NoPushretAddressError,
   InjectTimeoutError,
+  InjectAbortedError,
   MsvcrtNotLoadedError,
   CallTooManyArgsError,
   CallRipMismatchError,
@@ -28,6 +29,7 @@ import {
   CallThreadDiedError,
   ReallocNullError,
   ThreadReadNotImplementedError,
+  WaitAbortedError,
 } from './errors';
 import {
   findOverlappingRegion,
@@ -45,6 +47,22 @@ export { STACK_ADD } from './thread/captured-thread';
  * Accepts NativePointer (→ .address) and number (→ BigInt()) for convenience.
  */
 export type Arg = bigint | number | Native.NativePointer | string;
+
+export interface InjectOptions {
+  /** `AbortSignal` to cancel the inject operation. Rejection: `InjectAbortedError`. */
+  signal?: AbortSignal;
+  /** Maximum ms to wait for the thread to reach the sleep gadget. Default: 5000. */
+  timeoutMs?: number;
+  /**
+   * Poll interval (ms) used **only** during the initial hijack wait — i.e. while
+   * waiting for the target thread to reach the sleep gadget.  After injection
+   * completes this is reset to 1 ms so that every `proxy.call()` responds quickly.
+   *
+   * Raise this to reduce CPU burn when injecting into a thread parked in a long
+   * syscall (e.g. `Sleep(5000)`).  Default: 50.
+   */
+  pollIntervalMs?: number;
+}
 
 const nthreadLog = log.child('');
 
@@ -121,12 +139,19 @@ export class NThread {
    */
   async inject(
     thread: Native.Thread | number | CapturedThread,
+    options?: InjectOptions,
   ): Promise<[ProxyThread, CapturedThread]> {
+    const timeoutMs = options?.timeoutMs ?? 5000;
+    const pollIntervalMs = Math.max(0, options?.pollIntervalMs ?? 50);
+    this.throwIfAborted(options?.signal);
+
     if (!this.sleepAddress) {
       await this.setRandomSleepAddress();
+      this.throwIfAborted(options?.signal);
     }
     if (!this.pushretAddress || !this.regKey) {
       await this.setRandomPushretAddress();
+      this.throwIfAborted(options?.signal);
     }
 
     // After the set calls above, all three are guaranteed non-null (they throw on failure)
@@ -138,7 +163,9 @@ export class NThread {
     // and go straight to proxy setup. No try-catch here — the caller owns the
     // CapturedThread and is responsible for cleanup on failure.
     if (thread instanceof CapturedThread) {
+      this.throwIfAborted(options?.signal);
       const result = await this.setupProxy(thread);
+      this.throwIfAborted(options?.signal);
       await this.ensureCrtLoaded(result[0], thread);
       nthreadLog.info(`Proxy configured for captured thread ${thread.tid}`);
       return result;
@@ -159,6 +186,7 @@ export class NThread {
     }
 
     const captured = new CapturedThread(handle, tid, regKey, sleepAddress);
+    captured.pollIntervalMs = pollIntervalMs;
 
     try {
       captured.suspend();
@@ -186,15 +214,23 @@ export class NThread {
       captured.applyContext();
       captured.resume();
 
+      this.throwIfAborted(options?.signal);
+
       nthreadLog.info(
         `Waiting for thread ${captured.tid} to reach ${sleepAddress}...`,
       );
 
-      // Poll until Rip matches our infinite loop address
-      const res = await captured.wait(5000);
+      const res = await captured.wait(timeoutMs, options?.signal);
+
       if (res != Native.WaitReturn.OBJECT_0) {
         throw new InjectTimeoutError(res);
       }
+
+      // Restore tight poll cadence for subsequent threadCall() waits.
+      // The user-supplied pollIntervalMs was only needed during the hijack
+      // wait (e.g. a thread stuck in a long syscall); every proxy.call()
+      // after this point completes fast and should poll at 1 ms.
+      captured.pollIntervalMs = 1;
 
       // Refresh context now that we are stably 'parked' at sleepAddress
       captured.savedContext = captured.getContext();
@@ -215,7 +251,16 @@ export class NThread {
       return result;
     } catch (err) {
       captured.release();
+      if (err instanceof WaitAbortedError) {
+        throw new InjectAbortedError();
+      }
       throw err;
+    }
+  }
+
+  protected throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw new InjectAbortedError();
     }
   }
 

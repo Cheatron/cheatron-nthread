@@ -4,11 +4,17 @@ import {
   NThread,
   NThreadFile,
   CallThreadDiedError,
+  InjectAbortedError,
   createReadOnlyMemory,
   unregisterReadOnlyMemory,
   findOverlappingRegion,
 } from '@cheatron/nthread';
-import { spawnLoopThread, cleanupThread } from './helpers';
+import {
+  spawnLoopThread,
+  cleanupThread,
+  spawnSleepThread,
+  cleanupSleepThread,
+} from './helpers';
 
 describe('NThreadFile', () => {
   test('should inject and establish file channel', async () => {
@@ -226,6 +232,43 @@ describe('NThreadFile', () => {
       captured.close();
     } finally {
       cleanupThread(spawned);
+    }
+  });
+
+  test('inject — supports AbortSignal cancellation', async () => {
+    const spawned = await spawnLoopThread();
+
+    try {
+      const nt = new NThreadFile();
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        nt.inject(spawned.tid, { signal: controller.signal }),
+      ).rejects.toBeInstanceOf(InjectAbortedError);
+    } finally {
+      cleanupThread(spawned);
+    }
+  });
+
+  test('inject — aborts while target thread is in Sleep syscall', async () => {
+    const spawned = await spawnSleepThread(5000);
+
+    try {
+      const nt = new NThreadFile();
+      const controller = new AbortController();
+      const injectPromise = nt.inject(spawned.tid, {
+        signal: controller.signal,
+        timeoutMs: 10000,
+        pollIntervalMs: 10,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      controller.abort();
+
+      await expect(injectPromise).rejects.toBeInstanceOf(InjectAbortedError);
+    } finally {
+      cleanupSleepThread(spawned);
     }
   });
 
